@@ -1,0 +1,186 @@
+-module(gunner_SUITE).
+
+-include_lib("stdlib/include/assert.hrl").
+
+-export([all/0]).
+-export([groups/0]).
+-export([init_per_suite/1]).
+-export([end_per_suite/1]).
+-export([init_per_group/2]).
+-export([end_per_group/2]).
+-export([init_per_testcase/2]).
+-export([end_per_testcase/2]).
+
+-type test_case_name() :: atom().
+-type group_name() :: atom().
+-type config() :: [{atom(), term()}].
+-type test_return() :: _ | no_return().
+
+-export([request_ok/1]).
+-export([request_nxdomain/1]).
+-export([pool_resizing_ok_test/1]).
+-export([pool_unavalilable_test/1]).
+
+-spec all() -> [test_case_name() | {group, group_name()}].
+all() ->
+    [
+        {group, default},
+        {group, pool_tests}
+    ].
+
+-spec groups() -> [{group_name(), list(), [test_case_name()]}].
+groups() ->
+    [
+        {default, [], [
+            request_ok,
+            request_nxdomain
+        ]},
+        {pool_tests, [], [
+            pool_resizing_ok_test,
+            pool_unavalilable_test
+        ]}
+    ].
+
+-spec init_per_suite(config()) -> config().
+init_per_suite(C) ->
+    C.
+
+-spec end_per_suite(config()) -> _.
+end_per_suite(_C) ->
+    ok.
+
+%%
+
+-spec init_per_group(group_name(), config()) -> config().
+init_per_group(_, C) ->
+    Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
+    C ++ [{apps, [App || {ok, App} <- Apps]}].
+
+-spec end_per_group(group_name(), config()) -> _.
+end_per_group(_, C) ->
+    Apps = proplists:get_value(apps, C),
+    _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
+    ok.
+
+%%
+
+-spec init_per_testcase(test_case_name(), config()) -> config().
+init_per_testcase(_Name, C) ->
+    C.
+
+-spec end_per_testcase(test_case_name(), config()) -> _.
+end_per_testcase(_Name, _C) ->
+    ok.
+
+%%
+
+-spec request_ok(config()) -> test_return().
+request_ok(_C) ->
+    _ = start_mock_server(fun() ->
+        {200, #{}, <<"ok">>}
+    end),
+    {ok, _Result} = get(default, "localhost", 8080, <<"/">>),
+    _ = stop_mock_server().
+
+-spec request_nxdomain(config()) -> test_return().
+request_nxdomain(_C) ->
+    {error, {connection_failed, _}} = get(default, "localghost", 8080, <<"/">>).
+
+-spec pool_resizing_ok_test(config()) -> test_return().
+pool_resizing_ok_test(_C) ->
+    RequestProcessingSleep = 2500,
+    RequestsAmount = 25,
+    Pool = default,
+    Host = "localhost",
+    Port = 8080,
+    Path = <<"/">>,
+    _ = start_mock_server(fun() ->
+        _ = timer:sleep(RequestProcessingSleep),
+        {200, #{}, <<"ok">>}
+    end),
+    ok = spawn_requests(RequestsAmount, Pool, Host, Port, Path, 3000),
+    _ = timer:sleep(1000),
+    ?assertEqual(5, length(supervisor:which_children(gunner_connection_sup))),
+    Responses = gather_responses(RequestsAmount, RequestProcessingSleep),
+    ?assertEqual(ok, validate_no_errors(Responses, <<"ok">>)),
+    ?assertEqual(0, length(supervisor:which_children(gunner_connection_sup))),
+    _ = stop_mock_server().
+
+-spec pool_unavalilable_test(config()) -> test_return().
+pool_unavalilable_test(_C) ->
+    RequestProcessingSleep = 2500,
+    RequestsAmount = 26,
+    Pool = default,
+    Host = "localhost",
+    Port = 8080,
+    Path = <<"/">>,
+    _ = start_mock_server(fun() ->
+        _ = timer:sleep(RequestProcessingSleep),
+        {200, #{}, <<"ok">>}
+    end),
+    ok = spawn_requests(RequestsAmount, Pool, Host, Port, Path, 3000),
+    _ = timer:sleep(1000),
+    ?assertEqual(5, length(supervisor:which_children(gunner_connection_sup))),
+    Responses = gather_responses(RequestsAmount, RequestProcessingSleep),
+    ?assertEqual({error, pool_unavailable}, validate_no_errors(Responses, <<"ok">>)),
+    _ = stop_mock_server().
+
+%%
+
+get(Pool, Host, Port, Path) ->
+    get(Pool, Host, Port, Path, 1000).
+
+get(Pool, Host, Port, Path, Timeout) ->
+    gunner:request(Pool, Host, Port, Path, <<"GET">>, #{}, <<>>, #{}, Timeout).
+
+%%
+
+start_mock_server(HandlerFun) ->
+    mock_http_server:start(8080, HandlerFun).
+
+stop_mock_server() ->
+    mock_http_server:stop().
+
+%%
+
+spawn_requests(Amount, Pool, Host, Port, Path, Timeout) ->
+    Parent = self(),
+    _ = repeat(
+        fun() ->
+            spawn(fun() ->
+                Parent ! {request_response, get(Pool, Host, Port, Path, Timeout)}
+            end)
+        end,
+        Amount
+    ),
+    ok.
+
+gather_responses(Amount, Timeout) ->
+    repeat(
+        fun() ->
+            receive
+                {request_response, Response} ->
+                    Response
+            after Timeout -> {error, timeout}
+            end
+        end,
+        Amount
+    ).
+
+validate_no_errors([], _ResponseMatch) ->
+    ok;
+validate_no_errors([{ok, #{body := ResponseMatch}} | Rest], ResponseMatch) ->
+    validate_no_errors(Rest, ResponseMatch);
+validate_no_errors([{ok, ResponseNotMatch} | _Rest], _ResponseMatch) ->
+    {error, {response_does_not_match, ResponseNotMatch}};
+validate_no_errors([{error, _} = Error | _Rest], _ResponseMatch) ->
+    Error.
+
+repeat(Fun, I) ->
+    repeat(Fun, I, []).
+
+repeat(_Fun, 0, Acc) ->
+    Acc;
+repeat(Fun, I, Acc0) ->
+    Acc1 = Acc0 ++ [Fun()],
+    repeat(Fun, I - 1, Acc1).

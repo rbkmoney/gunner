@@ -1,0 +1,14 @@
+{application, gunner, [
+    {description, "Assistance in operating your guns"},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {mod, {gunner, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        genlib,
+        gun
+    ]},
+    {env, []},
+    {licenses, ["Apache 2.0"]}
+]}.
