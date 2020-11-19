@@ -132,15 +132,22 @@ handle_info({gun_data, Client, StreamRef, fin, Data}, #{client_pid := Client} = 
     Requests1 = process_gun_data(StreamRef, Data, get_state_requests(St0)),
     Requests2 = handle_fin(StreamRef, Requests1),
     {noreply, set_state_requests(Requests2, St0)};
+handle_info({gun_error, Client, RequestID, Reason}, St0 = #{client_pid := Client}) ->
+    Requests1 = reply_request_kill(RequestID, Reason, get_state_requests(St0)),
+    {noreply, set_state_requests(Requests1, St0)};
 handle_info({gun_down, Client, _Protocol, Reason, Killed}, St0 = #{client_pid := Client, monitor_ref := Mref}) ->
     {Host, Port, ClientOpts} = get_connection_opts(St0),
-    Requests1 = kill_requests(Killed, {gun_down, Reason}, get_state_requests(St0)),
-    true = demonitor(Mref, [flush]), %% Connection pid will exit next, since retries parameter is always 0
+    %% @TODO gun_down returns stream refs which already have been 'fin'ned, investigate
+    Requests0 = get_state_requests(St0),
+    KilledRefs = get_active_killed_refs(Killed, Requests0),
+    Requests1 = kill_requests(KilledRefs, {gun_down, Reason}, Requests0),
+    %% Connection pid will exit next, since retries parameter is always 0
+    true = demonitor(Mref, [flush]),
     case start_client(Host, Port, ClientOpts) of
         {ok, Client1, Mref1} ->
             {noreply, St0#{client_pid => Client1, monitor => Mref1, requests => Requests1}};
-        {error, Reason} ->
-            {stop, normal, St0}
+        {error, ConnectionError} ->
+            {stop, {failed_to_reconnect, ConnectionError}, St0}
     end;
 handle_info({'DOWN', Mref, process, Client, Reason}, St0 = #{client_pid := Client, monitor_ref := Mref}) ->
     {Host, Port, ClientOpts} = get_connection_opts(St0),
@@ -148,8 +155,8 @@ handle_info({'DOWN', Mref, process, Client, Reason}, St0 = #{client_pid := Clien
     case start_client(Host, Port, ClientOpts) of
         {ok, Client1, Mref1} ->
             {noreply, St0#{client_pid => Client1, monitor => Mref1, requests => Requests1}};
-        {error, Reason} ->
-            {stop, normal, St0}
+        {error, ConnectionError} ->
+            {stop, {failed_to_reconnect, ConnectionError}, St0}
     end.
 
 -spec terminate(any(), state()) -> ok.
@@ -214,6 +221,10 @@ kill_requests([], _Reason, Requests) ->
 kill_requests([RequestID | Rest], Reason, Requests0) ->
     Requests1 = reply_request_kill(RequestID, Reason, Requests0),
     kill_requests(Rest, Reason, Requests1).
+
+-spec get_active_killed_refs([request_id()] | all, requests()) -> [request_id()].
+get_active_killed_refs(KilledList, Requests0) ->
+    lists:filter(fun(KilledRef) -> maps:is_key(KilledRef, Requests0) end, KilledList).
 
 %%
 %% Utility

@@ -21,6 +21,8 @@
 -export([pool_resizing_ok_test/1]).
 -export([pool_unavalilable_test/1]).
 
+-define(REQUEST_PROCESSING_SLEEP, 2500).
+
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
     [
@@ -52,12 +54,23 @@ end_per_suite(_C) ->
 %%
 
 -spec init_per_group(group_name(), config()) -> config().
-init_per_group(_, C) ->
+init_per_group(default, C) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
+    _ = start_mock_server(fun() ->
+        {200, #{}, <<"ok">>}
+    end),
+    C ++ [{apps, [App || {ok, App} <- Apps]}];
+init_per_group(pool_tests, C) ->
+    Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
+    _ = start_mock_server(fun() ->
+        _ = timer:sleep(?REQUEST_PROCESSING_SLEEP),
+        {200, #{}, <<"ok">>}
+    end),
     C ++ [{apps, [App || {ok, App} <- Apps]}].
 
 -spec end_per_group(group_name(), config()) -> _.
 end_per_group(_, C) ->
+    _ = stop_mock_server(),
     Apps = proplists:get_value(apps, C),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
@@ -76,54 +89,38 @@ end_per_testcase(_Name, _C) ->
 
 -spec request_ok(config()) -> test_return().
 request_ok(_C) ->
-    _ = start_mock_server(fun() ->
-        {200, #{}, <<"ok">>}
-    end),
-    {ok, _Result} = get(default, "localhost", 8080, <<"/">>),
-    _ = stop_mock_server().
+    {ok, _Result} = get(default, "localhost", 8080, <<"/">>).
 
 -spec request_nxdomain(config()) -> test_return().
 request_nxdomain(_C) ->
-    {error, {connection_failed, _}} = get(default, "localghost", 8080, <<"/">>).
+    {error, {connection_error, {connection_failed, _}}} = get(default, "localghost", 8080, <<"/">>).
 
 -spec pool_resizing_ok_test(config()) -> test_return().
 pool_resizing_ok_test(_C) ->
-    RequestProcessingSleep = 2500,
     RequestsAmount = 25,
     Pool = default,
     Host = "localhost",
     Port = 8080,
     Path = <<"/">>,
-    _ = start_mock_server(fun() ->
-        _ = timer:sleep(RequestProcessingSleep),
-        {200, #{}, <<"ok">>}
-    end),
     ok = spawn_requests(RequestsAmount, Pool, Host, Port, Path, 3000),
     _ = timer:sleep(1000),
     ?assertEqual(5, length(supervisor:which_children(gunner_connection_sup))),
-    Responses = gather_responses(RequestsAmount, RequestProcessingSleep),
+    Responses = gather_responses(RequestsAmount, ?REQUEST_PROCESSING_SLEEP),
     ?assertEqual(ok, validate_no_errors(Responses, <<"ok">>)),
-    ?assertEqual(0, length(supervisor:which_children(gunner_connection_sup))),
-    _ = stop_mock_server().
+    ?assertEqual(0, length(supervisor:which_children(gunner_connection_sup))).
 
 -spec pool_unavalilable_test(config()) -> test_return().
 pool_unavalilable_test(_C) ->
-    RequestProcessingSleep = 2500,
     RequestsAmount = 26,
     Pool = default,
     Host = "localhost",
     Port = 8080,
     Path = <<"/">>,
-    _ = start_mock_server(fun() ->
-        _ = timer:sleep(RequestProcessingSleep),
-        {200, #{}, <<"ok">>}
-    end),
     ok = spawn_requests(RequestsAmount, Pool, Host, Port, Path, 3000),
     _ = timer:sleep(1000),
     ?assertEqual(5, length(supervisor:which_children(gunner_connection_sup))),
-    Responses = gather_responses(RequestsAmount, RequestProcessingSleep),
-    ?assertEqual({error, pool_unavailable}, validate_no_errors(Responses, <<"ok">>)),
-    _ = stop_mock_server().
+    Responses = gather_responses(RequestsAmount, ?REQUEST_PROCESSING_SLEEP),
+    ?assertEqual({error, pool_unavailable}, validate_no_errors(Responses, <<"ok">>)).
 
 %%
 

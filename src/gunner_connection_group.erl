@@ -14,6 +14,8 @@
 -export([load/1]).
 -export([load/2]).
 
+-export([is_member/2]).
+
 -export([add_connection/3]).
 -export([delete_connection/2]).
 
@@ -60,6 +62,10 @@ load(#{load := Load}) ->
 -spec load(connection(), state()) -> integer() | undefined.
 load(Connection, #{connections := Connections}) ->
     maps:get(Connection, Connections, undefined).
+
+-spec is_member(connection(), state()) -> boolean().
+is_member(Connection, #{connections := Connections}) ->
+    maps:is_key(Connection, Connections).
 
 -spec add_connection(connection(), load(), state()) -> state().
 add_connection(Connection, ConnLoad, St0 = #{connections := Connections, load := Load, size := Size}) ->
