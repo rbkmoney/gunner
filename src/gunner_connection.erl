@@ -77,10 +77,6 @@
     {invalid_client_options, _Reason, client_opts()}.
 
 %%
-
--define(DEFAULT_MAX_CONNECTION_IDLE_TIME, 5000).
-
-%%
 %% API functions
 %%
 
@@ -112,8 +108,8 @@ init([ConnOpts = #{host := Host, port := Port, client_opts := ClientOpts}]) ->
 handle_call({request, Path, Method, Headers, Body, Opts}, From, St0) ->
     Client = get_client(St0),
     StreamRef = gun:request(Client, Method, Path, Headers, Body, Opts),
-    St1 = add_request(StreamRef, From, St0),
-    {noreply, St1};
+    Requests1 = add_request(StreamRef, From, get_state_requests(St0)),
+    {noreply, set_state_requests(Requests1, St0)};
 handle_call(_Call, _From, _St) ->
     erlang:error(unexpected_call).
 
@@ -123,73 +119,65 @@ handle_cast(_Cast, St) ->
 
 -spec handle_info(any(), state()) -> {noreply, state()} | {stop, _Reason, state()}.
 handle_info({gun_response, Client, StreamRef, nofin, StatusCode, Headers}, #{client_pid := Client} = St0) ->
-    St1 = process_gun_response(StreamRef, StatusCode, Headers, St0),
-    {noreply, St1};
+    Requests1 = process_gun_response(StreamRef, StatusCode, Headers, get_state_requests(St0)),
+    {noreply, set_state_requests(Requests1, St0)};
 handle_info({gun_response, Client, StreamRef, fin, StatusCode, Headers}, #{client_pid := Client} = St0) ->
-    St1 = handle_fin(StreamRef, process_gun_response(StreamRef, StatusCode, Headers, St0)),
-    {noreply, St1};
+    Requests1 = process_gun_response(StreamRef, StatusCode, Headers, get_state_requests(St0)),
+    Requests2 = handle_fin(StreamRef, Requests1),
+    {noreply, set_state_requests(Requests2, St0)};
 handle_info({gun_data, Client, StreamRef, nofin, Data}, #{client_pid := Client} = St0) ->
-    St1 = process_gun_data(StreamRef, Data, St0),
-    {noreply, St1};
+    Requests1 = process_gun_data(StreamRef, Data, get_state_requests(St0)),
+    {noreply, set_state_requests(Requests1, St0)};
 handle_info({gun_data, Client, StreamRef, fin, Data}, #{client_pid := Client} = St0) ->
-    St1 = handle_fin(StreamRef, process_gun_data(StreamRef, Data, St0)),
-    {noreply, St1};
-handle_info({gun_down, Client, _Protocol, Reason, Killed}, St0 = #{client_pid := Client}) ->
+    Requests1 = process_gun_data(StreamRef, Data, get_state_requests(St0)),
+    Requests2 = handle_fin(StreamRef, Requests1),
+    {noreply, set_state_requests(Requests2, St0)};
+handle_info({gun_down, Client, _Protocol, Reason, Killed}, St0 = #{client_pid := Client, monitor_ref := Mref}) ->
     {Host, Port, ClientOpts} = get_connection_opts(St0),
-    St1 = kill_requests(Killed, {gun_down, Reason}, St0),
+    Requests1 = kill_requests(Killed, {gun_down, Reason}, get_state_requests(St0)),
+    true = demonitor(Mref, [flush]), %% Connection pid will exit next, since retries parameter is always 0
     case start_client(Host, Port, ClientOpts) of
         {ok, Client1, Mref1} ->
-            {noreply, St1#{client_pid => Client1, monitor => Mref1}};
+            {noreply, St0#{client_pid => Client1, monitor => Mref1, requests => Requests1}};
         {error, Reason} ->
             {stop, normal, St0}
     end;
 handle_info({'DOWN', Mref, process, Client, Reason}, St0 = #{client_pid := Client, monitor_ref := Mref}) ->
     {Host, Port, ClientOpts} = get_connection_opts(St0),
-    St1 = kill_requests(all, {down, Reason}, St0),
+    Requests1 = kill_requests(all, {down, Reason}, get_state_requests(St0)),
     case start_client(Host, Port, ClientOpts) of
         {ok, Client1, Mref1} ->
-            {noreply, St1#{client_pid => Client1, monitor => Mref1}};
+            {noreply, St0#{client_pid => Client1, monitor => Mref1, requests => Requests1}};
         {error, Reason} ->
             {stop, normal, St0}
     end.
 
 -spec terminate(any(), state()) -> ok.
 terminate(_Reason, St0) ->
-    _ = kill_requests(all, terminate, St0),
+    _ = kill_requests(all, terminate, get_state_requests(St0)),
     ok.
 
 %%
 %% Internal functions
 %%
 
--spec new_state(client(), MRef :: reference(), connection_opts()) -> state().
-new_state(Client, MRef, Opts) ->
-    #{
-        client_pid => Client,
-        monitor_ref => MRef,
-        connection_opts => Opts,
-        requests => #{}
-    }.
-
--spec process_gun_response(request_id(), status_code(), resp_headers(), state()) -> state().
-process_gun_response(RequestId, StatusCode, Headers, St0) ->
-    Request0 = get_request(RequestId, St0),
+-spec process_gun_response(request_id(), status_code(), resp_headers(), requests()) -> requests().
+process_gun_response(RequestId, StatusCode, Headers, Requests0) ->
+    Request0 = get_request(RequestId, Requests0),
     Request1 = set_response_status(StatusCode, Request0),
     Request2 = set_response_headers(Headers, Request1),
-    update_request(RequestId, Request2, St0).
+    update_request(RequestId, Request2, Requests0).
 
--spec process_gun_data(request_id(), body(), state()) -> state().
-process_gun_data(RequestId, NewData, St0) ->
-    Request0 = get_request(RequestId, St0),
+-spec process_gun_data(request_id(), body(), requests()) -> requests().
+process_gun_data(RequestId, NewData, Requests0) ->
+    Request0 = get_request(RequestId, Requests0),
     Data0 = get_response_body(Request0),
     Request1 = set_response_body(append_response_data(Data0, NewData), Request0),
-    update_request(RequestId, Request1, St0).
+    update_request(RequestId, Request1, Requests0).
 
--spec handle_fin(request_id(), state()) -> state().
-handle_fin(RequestId, St0) ->
-    #{from := From, response := Response} = get_request(RequestId, St0),
-    ok = gen_server:reply(From, {ok, Response}),
-    remove_request(RequestId, St0).
+-spec handle_fin(request_id(), requests()) -> requests().
+handle_fin(RequestId, Requests0) ->
+    reply_request_response(RequestId, Requests0).
 
 -spec get_client(state()) -> client().
 get_client(#{client_pid := Client}) ->
@@ -218,18 +206,14 @@ start_client(Host, Port, ClientOpts) ->
             {error, {invalid_client_options, Reason, ClientOpts}}
     end.
 
--spec kill_requests([request_id()] | all, Reason :: term(), state()) -> state().
-kill_requests(all, Reason, St0 = #{requests := Requests}) ->
-    kill_requests(maps:keys(Requests), Reason, St0);
-kill_requests([], _Reason, St0) ->
-    St0;
-kill_requests([RequestID | Rest], Reason, St0) ->
-    ok = kill_request(get_request(RequestID, St0), Reason),
-    kill_requests(Rest, Reason, remove_request(RequestID, St0)).
-
--spec kill_request(request_state(), Reason :: term()) -> ok.
-kill_request(#{from := From}, Reason) ->
-    gen_server:reply(From, {error, {request_killed, Reason}}).
+-spec kill_requests([request_id()] | all, Reason :: term(), requests()) -> requests().
+kill_requests(all, Reason, Requests) ->
+    kill_requests(maps:keys(Requests), Reason, Requests);
+kill_requests([], _Reason, Requests) ->
+    Requests;
+kill_requests([RequestID | Rest], Reason, Requests0) ->
+    Requests1 = reply_request_kill(RequestID, Reason, Requests0),
+    kill_requests(Rest, Reason, Requests1).
 
 %%
 %% Utility
@@ -249,25 +233,56 @@ create_response() ->
         status_code => unknown
     }.
 
--spec add_request(request_id(), request_owner(), state()) -> state().
-add_request(RequestId, From, St0) ->
-    update_request(RequestId, create_request_state(From), St0).
+%% state() modification
 
--spec get_request(request_id(), state()) -> request_state().
-get_request(RequestId, #{requests := Requests}) ->
+-spec new_state(client(), MRef :: reference(), connection_opts()) -> state().
+new_state(Client, MRef, Opts) ->
+    #{
+        client_pid => Client,
+        monitor_ref => MRef,
+        connection_opts => Opts,
+        requests => #{}
+    }.
+
+-spec get_state_requests(state()) -> requests().
+get_state_requests(#{requests := Requests}) ->
+    Requests.
+
+-spec set_state_requests(requests(), state()) -> state().
+set_state_requests(Requests1, St0) ->
+    St0#{requests => Requests1}.
+
+%% requests() modification
+
+-spec add_request(request_id(), request_owner(), requests()) -> requests().
+add_request(RequestId, From, Requests) ->
+    update_request(RequestId, create_request_state(From), Requests).
+
+-spec get_request(request_id(), requests()) -> request_state().
+get_request(RequestId, Requests) ->
     maps:get(RequestId, Requests).
 
--spec update_request(request_id(), request_state(), state()) -> state().
-update_request(RequestId, RequestState, #{requests := Requests0} = St0) ->
-    Requests1 = Requests0#{RequestId => RequestState},
-    St0#{requests => Requests1}.
+-spec update_request(request_id(), request_state(), requests()) -> requests().
+update_request(RequestId, RequestState, Requests0) ->
+    Requests0#{RequestId => RequestState}.
 
--spec remove_request(request_id(), state()) -> state().
-remove_request(RequestId, #{requests := Requests0} = St0) ->
-    Requests1 = maps:remove(RequestId, Requests0),
-    St0#{requests => Requests1}.
+-spec remove_request(request_id(), requests()) -> requests().
+remove_request(RequestId, Requests0) ->
+    maps:remove(RequestId, Requests0).
 
-%%
+-spec reply_request_response(request_id(), requests()) -> requests().
+reply_request_response(RequestId, Requests0) ->
+    #{from := From, response := Response} = get_request(RequestId, Requests0),
+    ok = gen_server:reply(From, {ok, Response}),
+    remove_request(RequestId, Requests0).
+
+-spec reply_request_kill(request_id(), KillReason :: term(), requests()) -> requests().
+reply_request_kill(RequestId, Reason, Requests0) ->
+    #{from := From} = get_request(RequestId, Requests0),
+    ok = gen_server:reply(From, {error, {request_killed, Reason}}),
+    remove_request(RequestId, Requests0).
+
+%% request_state() modification
 
 -spec set_response_status(status_code(), request_state()) -> request_state().
 set_response_status(StatusCode, #{response := ResponseData0} = Request0) ->
