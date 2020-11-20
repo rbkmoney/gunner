@@ -95,7 +95,7 @@ acquire_connection(St0 = #{connections := Connections0, load := Load}) ->
                 {CPid, CLoad};
             (CPid, CLoad, {_MinPid, MinLoad}) when CLoad < MinLoad ->
                 {CPid, CLoad};
-            (_CPid, CLoad, {MinPid, MinLoad}) when CLoad =< MinLoad ->
+            (_CPid, CLoad, {MinPid, MinLoad}) when CLoad >= MinLoad ->
                 {MinPid, MinLoad}
         end,
         undefined,
