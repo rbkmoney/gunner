@@ -2,7 +2,23 @@
 
 %% API functions
 
--export([request/9]).
+-export([start_pool/2]).
+-export([start_pool/3]).
+
+-export([stop_pool/1]).
+-export([stop_pool/2]).
+
+-export([pool_status/1]).
+-export([pool_status/2]).
+
+-export([acquire/2]).
+-export([acquire/3]).
+
+-export([free/2]).
+-export([free/3]).
+
+-export([transaction/3]).
+-export([transaction/4]).
 
 %% Application callbacks
 
@@ -13,63 +29,100 @@
 
 %% API types
 
--type pool_id() :: binary().
--type conn_host() :: inet:hostname() | inet:ip_address().
--type conn_port() :: inet:port_number().
--type req_path() :: iodata().
--type req_method() :: binary().
--type req_headers() :: gun:req_headers().
--type req_opts() :: gun:req_opts().
--type body() :: binary().
-
--type response() :: gunner_connection:response_data().
-
--export_type([
-    pool_id/0,
-    conn_host/0,
-    conn_port/0,
-    req_path/0,
-    req_method/0,
-    req_headers/0,
-    req_opts/0,
-    body/0,
-    response/0
-]).
-
 %% Internal types
--type timeout_t() :: {Now :: erlang:timestamp(), RemainingMS :: integer()}.
+
+-type pool_id() :: gunner_manager:pool_id().
 
 -type pool() :: gunner_pool:pool().
--type connection() :: gunner_connection:connection().
+-type pool_opts() :: gunner_pool:pool_opts().
+
+-type worker() :: gunner_worker_factory:worker(_).
+-type worker_args() :: gunner_worker_factory:worker_args(_).
+
+-type transaction_fun() :: fun((worker()) -> transaction_result()).
+-type transaction_result() :: any().
+
+%%
+
+-define(DEFAULT_TIMEOUT, 1000).
 
 %%
 %% API functions
 %%
 
--spec request(
-    pool_id(),
-    conn_host(),
-    conn_port(),
-    req_path(),
-    req_method(),
-    req_headers(),
-    body(),
-    req_opts(),
-    timeout()
-) -> {ok, response()} | {error, _Reason}.
-request(PoolID, Host, Port, Path, Method, ReqHeaders, Body, ReqOpts, TimeoutMS) ->
-    Timeout0 = init_timeout(TimeoutMS),
-    case get_pool(PoolID, Timeout0) of
+-spec start_pool(pool_id(), pool_opts()) -> ok | {error, already_exists}.
+start_pool(PoolID, PoolOpts) ->
+    start_pool(PoolID, PoolOpts, ?DEFAULT_TIMEOUT).
+
+-spec start_pool(pool_id(), pool_opts(), timeout()) -> ok | {error, already_exists}.
+start_pool(PoolID, PoolOpts, Timeout) ->
+    gunner_manager:start_pool(PoolID, PoolOpts, Timeout).
+
+-spec stop_pool(pool_id()) -> ok | {error, not_found}.
+stop_pool(PoolID) ->
+    stop_pool(PoolID, ?DEFAULT_TIMEOUT).
+
+-spec stop_pool(pool_id(), timeout()) -> ok | {error, not_found}.
+stop_pool(PoolID, Timeout) ->
+    gunner_manager:stop_pool(PoolID, Timeout).
+
+-spec pool_status(pool_id()) -> ok | {error, not_found}.
+pool_status(PoolID) ->
+    pool_status(PoolID, ?DEFAULT_TIMEOUT).
+
+-spec pool_status(pool_id(), timeout()) -> ok | {error, not_found}.
+pool_status(PoolID, Timeout) ->
+    case get_pool(PoolID, Timeout) of
         {ok, Pool} ->
-            Timeout1 = calculate_next_timeout(Timeout0),
-            case acquire_connection(Pool, Host, Port, Timeout1) of
-                {ok, Connection} ->
-                    Timeout2 = calculate_next_timeout(Timeout1),
-                    Result = do_request(Connection, Path, Method, ReqHeaders, Body, ReqOpts, Timeout2),
-                    ok = gunner_pool:free_connection(Pool, Host, Port, Connection),
-                    Result;
-                {error, _} = Error ->
-                    Error
+            {ok, get_pool_status(Pool, Timeout)};
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
+%%
+
+-spec acquire(pool_id(), worker_args()) ->
+    {ok, worker()} | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
+acquire(PoolID, WorkerArgs) ->
+    acquire(PoolID, WorkerArgs, ?DEFAULT_TIMEOUT).
+
+-spec acquire(pool_id(), worker_args(), timeout()) ->
+    {ok, worker()} | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
+acquire(PoolID, WorkerArgs, Timeout) ->
+    case get_pool(PoolID, Timeout) of
+        {ok, Pool} ->
+            acquire_from_pool(Pool, WorkerArgs, Timeout);
+        {error, not_found} ->
+            {error, pool_not_found}
+    end.
+
+-spec free(pool_id(), worker()) -> ok | {error, pool_not_found | invalid_worker}.
+free(PoolID, Worker) ->
+    free(PoolID, Worker, ?DEFAULT_TIMEOUT).
+
+-spec free(pool_id(), worker(), timeout()) -> ok | {error, pool_not_found | invalid_worker}.
+free(PoolID, Worker, Timeout) ->
+    case get_pool(PoolID, Timeout) of
+        {ok, Pool} ->
+            free_to_pool(Pool, Worker, Timeout);
+        {error, not_found} ->
+            {error, pool_not_found}
+    end.
+
+-spec transaction(pool_id(), worker_args(), transaction_fun()) ->
+    transaction_result() | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
+transaction(PoolID, WorkerArgs, TransactionFun) ->
+    transaction(PoolID, WorkerArgs, TransactionFun, ?DEFAULT_TIMEOUT).
+
+-spec transaction(pool_id(), worker_args(), transaction_fun(), timeout()) ->
+    transaction_result() | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
+transaction(PoolID, WorkerArgs, TransactionFun, Timeout) ->
+    case acquire(PoolID, WorkerArgs, Timeout) of
+        {ok, Worker} ->
+            try
+                TransactionFun(Worker)
+            after
+                ok = free(PoolID, Worker, Timeout)
             end;
         {error, _} = Error ->
             Error
@@ -87,81 +140,23 @@ start(_StartType, _StartArgs) ->
 stop(_State) ->
     ok.
 
-%% Internal
-
--spec get_pool(pool_id(), timeout_t()) -> {ok, pool()} | {error, timeout | _Reason}.
-get_pool(PoolID, Timeout) ->
-    case get_remaining(Timeout) of
-        Remaining when is_integer(Remaining) ->
-            gunner_manager:get_pool(PoolID, Remaining);
-        timeout ->
-            {error, timeout}
-    end.
-
--spec acquire_connection(pool(), conn_host(), conn_port(), timeout_t()) ->
-    {ok, connection()} | {error, timeout | _Reason}.
-acquire_connection(Pool, Host, Port, Timeout) ->
-    case get_remaining(Timeout) of
-        Remaining when is_integer(Remaining) ->
-            gunner_pool:acquire_connection(Pool, Host, Port, Remaining);
-        timeout ->
-            {error, timeout}
-    end.
-
--spec do_request(connection(), req_path(), req_method(), req_headers(), body(), req_opts(), timeout_t()) ->
-    {ok, response()} | {error, timeout | _Reason}.
-do_request(Connection, Path, Method, ReqHeaders, Body, ReqOpts, Timeout) ->
-    case get_remaining(Timeout) of
-        Remaining when is_integer(Remaining) ->
-            gunner_connection:request(Connection, Path, Method, ReqHeaders, Body, ReqOpts, Remaining);
-        timeout ->
-            {error, timeout}
-    end.
-
+%%
+%% Internal functions
 %%
 
--spec init_timeout(TotalMS :: integer()) -> timeout_t().
-init_timeout(TotalMS) ->
-    Now = erlang:timestamp(),
-    {Now, TotalMS}.
+-spec get_pool(pool_id(), timeout()) -> {ok, pool()} | {error, not_found}.
+get_pool(PoolID, Timeout) ->
+    gunner_manager:get_pool(PoolID, Timeout).
 
--spec calculate_next_timeout(timeout_t()) -> timeout_t() | timeout.
-calculate_next_timeout({PreviousTS, PrevousRemaining}) ->
-    Now = erlang:timestamp(),
-    Diff = timer:now_diff(Now, PreviousTS) div 1000,
-    case PrevousRemaining - Diff of
-        NewRemaining when NewRemaining > 0 ->
-            {Now, NewRemaining};
-        _ ->
-            timeout
-    end.
+-spec acquire_from_pool(pool_id(), worker_args(), timeout()) ->
+    {ok, worker()} | {error, pool_unavailable | {worker_init_failed, _}}.
+acquire_from_pool(Pool, WorkerArgs, Timeout) ->
+    gunner_pool:acquire(Pool, WorkerArgs, Timeout).
 
--spec get_remaining(timeout_t() | timeout) -> Remaining :: integer() | timeout.
-get_remaining(timeout) ->
-    timeout;
-get_remaining({_, Remaining}) ->
-    Remaining.
+-spec free_to_pool(pool_id(), worker(), timeout()) -> ok | {error, invalid_worker}.
+free_to_pool(Pool, Worker, Timeout) ->
+    gunner_pool:free(Pool, Worker, Timeout).
 
--ifdef(EUNIT).
--include_lib("eunit/include/eunit.hrl").
-
--spec test() -> _.
-
--spec timeout_test() -> _.
-
-timeout_test() ->
-    Timeout1 = init_timeout(3000),
-    ?assertEqual(3000, get_remaining(Timeout1)),
-    _ = timer:sleep(1000),
-    Timeout2 = calculate_next_timeout(Timeout1),
-    ?assertMatch(NextTime when NextTime > 1900, get_remaining(Timeout2)),
-    ?assertMatch(NextTime when NextTime < 2000, get_remaining(Timeout2)),
-    _ = timer:sleep(1000),
-    Timeout3 = calculate_next_timeout(Timeout2),
-    ?assertMatch(NextTime when NextTime > 900, get_remaining(Timeout3)),
-    ?assertMatch(NextTime when NextTime < 1000, get_remaining(Timeout3)),
-    _ = timer:sleep(1000),
-    Timeout4 = calculate_next_timeout(Timeout3),
-    ?assertEqual(timeout, get_remaining(Timeout4)).
-
--endif.
+-spec get_pool_status(pool_id(), timeout()) -> gunner_pool:status_response().
+get_pool_status(Pool, Timeout) ->
+    gunner_pool:pool_status(Pool, Timeout).

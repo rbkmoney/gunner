@@ -22,6 +22,7 @@
 -export([pool_unavalilable_test/1]).
 
 -define(REQUEST_PROCESSING_SLEEP, 2500).
+-define(GUNNER_POOL, default).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
@@ -59,6 +60,7 @@ init_per_group(default, C) ->
     _ = start_mock_server(fun() ->
         {200, #{}, <<"ok">>}
     end),
+    ok = gunner:start_pool(?GUNNER_POOL, #{}),
     C ++ [{apps, [App || {ok, App} <- Apps]}];
 init_per_group(pool_tests, C) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
@@ -66,11 +68,13 @@ init_per_group(pool_tests, C) ->
         _ = timer:sleep(?REQUEST_PROCESSING_SLEEP),
         {200, #{}, <<"ok">>}
     end),
+    ok = gunner:start_pool(?GUNNER_POOL, #{}),
     C ++ [{apps, [App || {ok, App} <- Apps]}].
 
 -spec end_per_group(group_name(), config()) -> _.
 end_per_group(_, C) ->
     _ = stop_mock_server(),
+    ok = gunner:stop_pool(?GUNNER_POOL),
     Apps = proplists:get_value(apps, C),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
@@ -89,36 +93,36 @@ end_per_testcase(_Name, _C) ->
 
 -spec request_ok(config()) -> test_return().
 request_ok(_C) ->
-    {ok, _Result} = get(default, "localhost", 8080, <<"/">>).
+    {ok, _Result} = get(?GUNNER_POOL, "localhost", 8080, <<"/">>).
 
 -spec request_nxdomain(config()) -> test_return().
 request_nxdomain(_C) ->
-    {error, {connection_error, {connection_failed, _}}} = get(default, "localghost", 8080, <<"/">>).
+    {error, {worker_init_failed, {connection_failed, _}}} = get(?GUNNER_POOL, "localghost", 8080, <<"/">>).
 
 -spec pool_resizing_ok_test(config()) -> test_return().
 pool_resizing_ok_test(_C) ->
     RequestsAmount = 25,
-    Pool = default,
+    Pool = ?GUNNER_POOL,
     Host = "localhost",
     Port = 8080,
     Path = <<"/">>,
     ok = spawn_requests(RequestsAmount, Pool, Host, Port, Path, 3000),
     _ = timer:sleep(1000),
-    ?assertEqual(5, length(supervisor:which_children(gunner_connection_sup))),
+    ?assertEqual(25, get_pool_size(Pool)),
     Responses = gather_responses(RequestsAmount, ?REQUEST_PROCESSING_SLEEP),
-    ?assertEqual(ok, validate_no_errors(Responses, <<"ok">>)),
-    ?assertEqual(0, length(supervisor:which_children(gunner_connection_sup))).
+    ?assertEqual(5, get_pool_size(Pool)),
+    ?assertEqual(ok, validate_no_errors(Responses, <<"ok">>)).
 
 -spec pool_unavalilable_test(config()) -> test_return().
 pool_unavalilable_test(_C) ->
     RequestsAmount = 26,
-    Pool = default,
+    Pool = ?GUNNER_POOL,
     Host = "localhost",
     Port = 8080,
     Path = <<"/">>,
     ok = spawn_requests(RequestsAmount, Pool, Host, Port, Path, 3000),
     _ = timer:sleep(1000),
-    ?assertEqual(5, length(supervisor:which_children(gunner_connection_sup))),
+    ?assertEqual(25, get_pool_size(Pool)),
     Responses = gather_responses(RequestsAmount, ?REQUEST_PROCESSING_SLEEP),
     ?assertEqual({error, pool_unavailable}, validate_no_errors(Responses, <<"ok">>)).
 
@@ -128,7 +132,31 @@ get(Pool, Host, Port, Path) ->
     get(Pool, Host, Port, Path, 1000).
 
 get(Pool, Host, Port, Path, Timeout) ->
-    gunner:request(Pool, Host, Port, Path, <<"GET">>, #{}, <<>>, #{}, Timeout).
+    gunner:transaction(
+        Pool,
+        {Host, Port},
+        fun(Client) ->
+            StreamRef = gun:get(Client, Path),
+            Deadline = erlang:monotonic_time(millisecond) + Timeout,
+            case gun:await(Client, StreamRef, Timeout) of
+                {response, nofin, 200, _Headers} ->
+                    TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
+                    case gun:await_body(Client, StreamRef, TimeoutLeft) of
+                        {ok, Response, _Trailers} ->
+                            {ok, Response};
+                        {ok, Response} ->
+                            {ok, Response};
+                        {error, Reason} ->
+                            {error, {unknown, Reason}}
+                    end;
+                {response, fin, 404, _Headers} ->
+                    {error, notfound};
+                {error, Reason} ->
+                    {error, {unknown, Reason}}
+            end
+        end,
+        Timeout
+    ).
 
 %%
 
@@ -166,7 +194,7 @@ gather_responses(Amount, Timeout) ->
 
 validate_no_errors([], _ResponseMatch) ->
     ok;
-validate_no_errors([{ok, #{body := ResponseMatch}} | Rest], ResponseMatch) ->
+validate_no_errors([{ok, ResponseMatch} | Rest], ResponseMatch) ->
     validate_no_errors(Rest, ResponseMatch);
 validate_no_errors([{ok, ResponseNotMatch} | _Rest], _ResponseMatch) ->
     {error, {response_does_not_match, ResponseNotMatch}};
@@ -181,3 +209,7 @@ repeat(_Fun, 0, Acc) ->
 repeat(Fun, I, Acc0) ->
     Acc1 = Acc0 ++ [Fun()],
     repeat(Fun, I - 1, Acc1).
+
+get_pool_size(PoolID) ->
+    {ok, #{current_size := Size}} = gunner:pool_status(PoolID),
+    Size.

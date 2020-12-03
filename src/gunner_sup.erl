@@ -27,13 +27,6 @@ init([]) ->
     },
     Children = [
         #{
-            id => gunner_connection_sup,
-            start => {gunner_connection_sup, start_link, []},
-            type => supervisor,
-            restart => permanent,
-            shutdown => brutal_kill
-        },
-        #{
             id => gunner_pool_sup,
             start => {gunner_pool_sup, start_link, []},
             type => supervisor,

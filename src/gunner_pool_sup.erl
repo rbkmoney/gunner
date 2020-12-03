@@ -19,9 +19,9 @@
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
--spec start_pool(gunner_pool:pool_id()) -> {ok, pid()} | {error, _}.
-start_pool(PoolID) ->
-    supervisor:start_child(?SERVER, [PoolID]).
+-spec start_pool(gunner_pool:pool_opts()) -> {ok, pid()} | {error, _}.
+start_pool(PoolOpts) ->
+    supervisor:start_child(?SERVER, [PoolOpts]).
 
 -spec stop_pool(pid()) -> ok | {error, term()}.
 stop_pool(Pid) ->
