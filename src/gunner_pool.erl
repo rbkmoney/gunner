@@ -92,17 +92,18 @@ init([PoolOpts]) ->
 handle_call({acquire, WorkerArgs0}, _From, St0 = #{worker_factory_handler := FactoryHandler}) ->
     {GroupID, WorkerArgs1} = gunner_worker_factory:on_acquire(FactoryHandler, WorkerArgs0),
     St1 = ensure_group_exists(GroupID, St0),
-    try maybe_expand_pool(GroupID, WorkerArgs1, St1) of
-        {ok, St2} ->
-            Group0 = get_state_worker_group(GroupID, St2),
-            {Worker, Group1} = get_next_worker(Group0),
-            St3 = update_state_worker_group(GroupID, Group1, St2),
+    try
+        St2 = maybe_expand_pool(GroupID, WorkerArgs1, St1),
 
-            Leases0 = get_worker_leases(St3),
-            Leases1 = add_new_lease(Worker, GroupID, Leases0),
-            St4 = update_worker_leases(Leases1, St3),
+        Group0 = get_state_worker_group(GroupID, St2),
+        {Worker, Group1} = get_next_worker(Group0),
+        St3 = update_state_worker_group(GroupID, Group1, St2),
 
-            {reply, {ok, Worker}, St4}
+        Leases0 = get_worker_leases(St3),
+        Leases1 = add_new_lease(Worker, GroupID, Leases0),
+        St4 = update_worker_leases(Leases1, St3),
+
+        {reply, {ok, Worker}, St4}
     catch
         throw:pool_unavailable ->
             {reply, {error, pool_unavailable}, St0};
@@ -168,7 +169,7 @@ ensure_group_exists(GroupID, St0 = #{worker_groups := Groups0}) ->
             St0#{worker_groups := Groups1}
     end.
 
--spec maybe_expand_pool(worker_group_id(), worker_args(), state()) -> {ok, state()} | no_return().
+-spec maybe_expand_pool(worker_group_id(), worker_args(), state()) -> state() | no_return().
 maybe_expand_pool(GroupID, WorkerArgs, St0 = #{size := PoolSize, worker_factory_handler := FactoryHandler}) ->
     Group0 = get_state_worker_group(GroupID, St0),
     case group_needs_expansion(Group0) of
@@ -176,9 +177,9 @@ maybe_expand_pool(GroupID, WorkerArgs, St0 = #{size := PoolSize, worker_factory_
             _ = assert_pool_available(PoolSize, St0),
             Group1 = try_expand_group(WorkerArgs, Group0, FactoryHandler),
             St1 = update_state_worker_group(GroupID, Group1, St0),
-            {ok, St1#{size => PoolSize + 1}};
+            St1#{size => PoolSize + 1};
         false ->
-            {ok, St0}
+            St0
     end.
 
 -spec assert_pool_available(size(), state()) -> ok | no_return().
@@ -194,6 +195,7 @@ assert_pool_available(PoolSize, _St0) ->
 try_expand_group(WorkerArgs, Group0, FactoryHandler) ->
     case gunner_worker_factory:create_worker(FactoryHandler, WorkerArgs) of
         {ok, Worker} ->
+            _ = erlang:monitor(process, Worker),
             add_worker_to_group(Worker, Group0);
         {error, Reason} ->
             throw({worker_init_failed, Reason})
