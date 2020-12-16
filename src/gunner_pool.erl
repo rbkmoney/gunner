@@ -158,58 +158,29 @@ handle_acquire(GroupID, ClientPid, St0 = #{worker_groups := WorkerGroups0, clien
 
 -spec fetch_next_worker(worker_group_id(), worker_groups()) -> {worker(), worker_groups()}.
 fetch_next_worker(GroupID, WorkerGroups) ->
-    Group0 = get_worker_group(GroupID, WorkerGroups),
+    Group0 = get_worker_group_by_id(GroupID, WorkerGroups),
     {Worker, Group1} = get_next_worker(Group0),
     {Worker, update_worker_group(GroupID, Group1, WorkerGroups)}.
-
--spec get_worker_group(worker_group_id(), worker_groups()) -> worker_group().
-get_worker_group(GroupID, WorkerGroups) ->
-    maps:get(GroupID, WorkerGroups).
-
--spec update_worker_group(worker_group_id(), worker_group(), worker_groups()) -> worker_groups().
-update_worker_group(GroupID, Group, WorkerGroups) ->
-    WorkerGroups#{GroupID => Group}.
 
 -spec register_client_lease(client_pid(), worker(), worker_group_id(), clients()) -> clients().
 register_client_lease(ClientPid, Worker, GroupID, Clients0) ->
     Clients1 = ensure_client_state_exists(ClientPid, Clients0),
-    ClientSt0 = get_client_state(ClientPid, Clients1),
-    ClientSt1 = register_new_lease(Worker, GroupID, ClientSt0),
+    ClientSt0 = get_client_state_by_pid(ClientPid, Clients1),
+    ClientSt1 = register_client_lease(Worker, GroupID, ClientSt0),
     update_client_state(ClientPid, ClientSt1, Clients1).
 
 -spec ensure_client_state_exists(client_pid(), clients()) -> clients().
 ensure_client_state_exists(ClientPid, Clients) ->
-    case check_client_state_exists(ClientPid, Clients) of
+    case client_state_exists(ClientPid, Clients) of
         true ->
             Clients;
         false ->
             add_new_client_state(ClientPid, Clients)
     end.
 
--spec check_client_state_exists(client_pid(), clients()) -> boolean().
-check_client_state_exists(ClientPid, Clients) ->
-    maps:is_key(ClientPid, Clients).
-
 -spec add_new_client_state(client_pid(), clients()) -> clients().
-add_new_client_state(ClientPid, Clients0) ->
-    _ = erlang:monitor(process, ClientPid),
-    Clients0#{ClientPid => gunner_pool_client_state:new()}.
-
--spec get_client_state(client_pid(), clients()) -> client_state() | undefined.
-get_client_state(ClientPid, Clients) ->
-    maps:get(ClientPid, Clients, undefined).
-
--spec remove_client_state(client_pid(), clients()) -> clients().
-remove_client_state(ClientPid, Clients) ->
-    maps:without([ClientPid], Clients).
-
--spec register_new_lease(worker(), worker_group_id(), client_state()) -> client_state().
-register_new_lease(Worker, GroupID, ClientSt) ->
-    gunner_pool_client_state:register_lease(Worker, GroupID, ClientSt).
-
--spec update_client_state(client_pid(), client_state(), clients()) -> clients().
-update_client_state(ClientPid, ClientState, Clients) ->
-    Clients#{ClientPid => ClientState}.
+add_new_client_state(ClientPid, Clients) ->
+    update_client_state(ClientPid, create_client_state(), Clients).
 
 %%
 
@@ -221,7 +192,7 @@ handle_free(Worker, ClientPid, St = #{worker_groups := WorkerGroups0, clients :=
 
 -spec try_get_client_state(client_pid(), clients()) -> client_state() | no_return().
 try_get_client_state(ClientPid, Clients) ->
-    case get_client_state(ClientPid, Clients) of
+    case get_client_state_by_pid(ClientPid, Clients) of
         ClientState when ClientState =/= undefined ->
             ClientState;
         undefined ->
@@ -236,7 +207,7 @@ return_lease(Worker, ClientPid, Clients) ->
 
 -spec do_return_lease(worker(), client_state()) -> {worker_group_id(), client_state()} | no_return().
 do_return_lease(Worker, ClientState) ->
-    case gunner_pool_client_state:return_lease(Worker, ClientState) of
+    case return_client_lease(Worker, ClientState) of
         {ok, WorkerGroupId, NewClientState} ->
             {WorkerGroupId, NewClientState};
         {error, _} ->
@@ -245,7 +216,7 @@ do_return_lease(Worker, ClientState) ->
 
 -spec return_worker(worker(), worker_group_id(), worker_groups()) -> worker_groups().
 return_worker(Worker, GroupID, WorkerGroups) ->
-    Group0 = get_worker_group(GroupID, WorkerGroups),
+    Group0 = get_worker_group_by_id(GroupID, WorkerGroups),
     Group1 = add_worker_to_group(Worker, Group0),
     update_worker_group(GroupID, Group1, WorkerGroups).
 
@@ -264,7 +235,7 @@ cancel_lease(ClientPid, Clients) ->
 
 -spec do_cancel_lease(client_state()) -> {worker(), worker_group_id(), client_state()} | no_return().
 do_cancel_lease(ClientState) ->
-    case gunner_pool_client_state:cancel_lease(ClientState) of
+    case cancel_client_lease(ClientState) of
         {ok, Worker, WorkerGroupId, NewClientState} ->
             {Worker, WorkerGroupId, NewClientState};
         {error, _} ->
@@ -279,7 +250,7 @@ handle_process_down(Pid, St) ->
 
 -spec determine_process_type(worker() | client_pid(), state()) -> worker | client.
 determine_process_type(Pid, #{clients := Clients}) ->
-    case check_client_state_exists(Pid, Clients) of
+    case client_state_exists(Pid, Clients) of
         true ->
             client;
         false ->
@@ -290,8 +261,8 @@ determine_process_type(Pid, #{clients := Clients}) ->
     (client, client_pid(), state()) -> state();
     (worker, worker(), state()) -> state().
 handle_process_down(client, ClientPid, St = #{clients := Clients0}) ->
-    ClientSt0 = get_client_state(ClientPid, Clients0),
-    {Leases, _ClientSt1} = gunner_pool_client_state:purge_leases(ClientSt0),
+    ClientSt0 = get_client_state_by_pid(ClientPid, Clients0),
+    {Leases, _ClientSt1} = purge_client_leases(ClientSt0),
     return_all_leases(Leases, St#{clients => remove_client_state(ClientPid, Clients0)});
 handle_process_down(worker, Worker, St = #{worker_groups := Groups0}) ->
     Groups1 = maps:map(
@@ -320,11 +291,61 @@ new_state(Opts) ->
         worker_factory_handler => maps:get(worker_factory_handler, Opts, ?DEFAULT_WORKER_FACTORY)
     }.
 
-%%
+%% Client states
 
--spec create_worker_group(worker_group_id(), worker_groups()) -> worker_groups().
-create_worker_group(GroupID, Groups) ->
-    Groups#{GroupID => gunner_pool_worker_group:new()}.
+-spec get_client_state_by_pid(client_pid(), clients()) -> client_state() | undefined.
+get_client_state_by_pid(ClientPid, Clients) ->
+    maps:get(ClientPid, Clients, undefined).
+
+-spec update_client_state(client_pid(), client_state(), clients()) -> clients().
+update_client_state(ClientPid, ClientState, Clients) ->
+    Clients#{ClientPid => ClientState}.
+
+-spec remove_client_state(client_pid(), clients()) -> clients().
+remove_client_state(ClientPid, Clients) ->
+    maps:without([ClientPid], Clients).
+
+-spec client_state_exists(client_pid(), clients()) -> boolean().
+client_state_exists(ClientPid, Clients) ->
+    maps:is_key(ClientPid, Clients).
+
+-spec create_client_state() -> client_state().
+create_client_state() ->
+    gunner_pool_client_state:new().
+
+-spec register_client_lease(worker(), worker_group_id(), client_state()) -> client_state().
+register_client_lease(Worker, GroupID, ClientSt) ->
+    gunner_pool_client_state:register_lease(Worker, GroupID, ClientSt).
+
+-spec return_client_lease(worker(), client_state()) -> {ok, worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
+return_client_lease(Worker, ClientSt) ->
+    gunner_pool_client_state:return_lease(Worker, ClientSt).
+
+-spec cancel_client_lease(client_state()) -> {ok, worker(), worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
+cancel_client_lease(ClientSt) ->
+    gunner_pool_client_state:cancel_lease(ClientSt).
+
+-spec purge_client_leases(client_state()) -> {[{worker(), worker_group_id()}], client_state()}.
+purge_client_leases(ClientSt) ->
+    gunner_pool_client_state:purge_leases(ClientSt).
+
+%% Worker groups
+
+-spec get_worker_group_by_id(worker_group_id(), worker_groups()) -> worker_group() | undefined.
+get_worker_group_by_id(WorkerGroupID, WorkerGroups) ->
+    maps:get(WorkerGroupID, WorkerGroups, undefined).
+
+-spec update_worker_group(worker_group_id(), worker_group(), worker_groups()) -> worker_groups().
+update_worker_group(GroupID, Group, WorkerGroups) ->
+    WorkerGroups#{GroupID => Group}.
+
+-spec worker_group_exists(worker_group_id(), worker_groups()) -> boolean().
+worker_group_exists(WorkerGroupID, WorkerGroups) ->
+    maps:is_key(WorkerGroupID, WorkerGroups).
+
+-spec create_worker_group() -> worker_group().
+create_worker_group() ->
+    gunner_pool_worker_group:new().
 
 -spec is_worker_group_empty(worker_group()) -> boolean().
 is_worker_group_empty(Group) ->
@@ -338,6 +359,10 @@ get_next_worker(Group) ->
 add_worker_to_group(Worker, Group) ->
     gunner_pool_worker_group:add_worker(Worker, Group).
 
+-spec get_worker_group_size(worker_group()) -> non_neg_integer().
+get_worker_group_size(Group) ->
+    gunner_pool_worker_group:size(Group).
+
 %%
 
 -spec get_pool_status(state()) -> status_response().
@@ -346,11 +371,11 @@ get_pool_status(#{size := Size}) ->
 
 -spec ensure_group_exists(worker_group_id(), state()) -> state().
 ensure_group_exists(GroupID, St0 = #{worker_groups := Groups0}) ->
-    case check_group_exists(GroupID, Groups0) of
+    case worker_group_exists(GroupID, Groups0) of
         true ->
             St0;
         false ->
-            Groups1 = create_worker_group(GroupID, Groups0),
+            Groups1 = update_worker_group(GroupID, create_worker_group(), Groups0),
             St0#{worker_groups := Groups1}
     end.
 
@@ -390,18 +415,13 @@ try_expand_group(WorkerArgs, Group0, FactoryHandler) ->
 group_needs_expansion(Group) ->
     is_worker_group_empty(Group).
 
--spec check_group_exists(worker_group_id(), worker_groups()) -> boolean().
-check_group_exists(GroupID, Groups) ->
-    maps:is_key(GroupID, Groups).
-
 -spec get_state_worker_group(worker_group_id(), state()) -> worker_group().
-get_state_worker_group(GroupID, #{worker_groups := Groups0}) ->
-    maps:get(GroupID, Groups0).
+get_state_worker_group(GroupID, #{worker_groups := Groups}) ->
+    get_worker_group_by_id(GroupID, Groups).
 
 -spec update_state_worker_group(worker_group_id(), worker_group(), state()) -> state().
-update_state_worker_group(GroupID, Group, St0 = #{worker_groups := Groups0}) ->
-    Groups1 = Groups0#{GroupID => Group},
-    St0#{worker_groups => Groups1}.
+update_state_worker_group(GroupID, Group, St = #{worker_groups := Groups}) ->
+    St#{worker_groups => update_worker_group(GroupID, Group, Groups)}.
 
 -spec maybe_shrink_pool(worker_group_id(), state()) -> state().
 maybe_shrink_pool(GroupID, St0 = #{size := PoolSize, worker_factory_handler := FactoryHandler}) ->
@@ -422,7 +442,7 @@ group_needs_shrinking(Group) ->
 
 -spec is_worker_group_full(worker_group(), Max :: non_neg_integer()) -> boolean().
 is_worker_group_full(Group, MaxFreeGroupConnections) ->
-    gunner_pool_worker_group:size(Group) > MaxFreeGroupConnections.
+    get_worker_group_size(Group) > MaxFreeGroupConnections.
 
 -spec do_shrink_group(worker_group(), module()) -> worker_group().
 do_shrink_group(Group0, FactoryHandler) ->
