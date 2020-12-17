@@ -317,11 +317,13 @@ create_client_state() ->
 register_client_lease(Worker, GroupID, ClientSt) ->
     gunner_pool_client_state:register_lease(Worker, GroupID, ClientSt).
 
--spec return_client_lease(worker(), client_state()) -> {ok, worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
+-spec return_client_lease(worker(), client_state()) ->
+    {ok, worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
 return_client_lease(Worker, ClientSt) ->
     gunner_pool_client_state:return_lease(Worker, ClientSt).
 
--spec cancel_client_lease(client_state()) -> {ok, worker(), worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
+-spec cancel_client_lease(client_state()) ->
+    {ok, worker(), worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
 cancel_client_lease(ClientSt) ->
     gunner_pool_client_state:cancel_lease(ClientSt).
 
