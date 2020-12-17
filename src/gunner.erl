@@ -151,7 +151,13 @@ get_pool(PoolID, Timeout) ->
 -spec acquire_from_pool(pool_id(), worker_args(), timeout()) ->
     {ok, worker()} | {error, pool_unavailable | {worker_init_failed, _}}.
 acquire_from_pool(Pool, WorkerArgs, Timeout) ->
-    gunner_pool:acquire(Pool, WorkerArgs, Timeout).
+    try
+        gunner_pool:acquire(Pool, WorkerArgs, Timeout)
+    catch
+        Error:Reason:Stacktrace ->
+            gunner_pool:cancel_acquire(Pool),
+            erlang:raise(Error, Reason, Stacktrace)
+    end.
 
 -spec free_to_pool(pool_id(), worker(), timeout()) -> ok | {error, invalid_worker}.
 free_to_pool(Pool, Worker, Timeout) ->

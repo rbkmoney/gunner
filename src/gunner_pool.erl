@@ -42,6 +42,8 @@
     size := size(),
     worker_groups := worker_groups(),
     clients := clients(),
+    worker_requests := worker_requests(),
+    %@TODO remove
     worker_factory_handler := module()
 }.
 
@@ -58,13 +60,24 @@
 -type client_pid() :: pid().
 -type client_state() :: gunner_pool_client_state:state().
 
+-type worker_requests() :: #{
+    worker() => worker_request()
+}.
+
+-type worker_request() :: {worker_group_id(), TargetClient :: from()}.
+
 -type size() :: non_neg_integer().
 
 -type worker() :: gunner_worker_factory:worker(_).
 -type worker_args() :: gunner_worker_factory:worker_args(_).
 
+-type gun_client_opts() :: gun:opts().
+
+-type from() :: {pid(), Tag :: _}.
+
 %%
 
+-define(DEFAULT_CLIENT_OPTS, #{connect_timeout => 5000}).
 -define(DEFAULT_WORKER_FACTORY, gunner_gun_worker_factory).
 -define(DEFAULT_MAX_POOL_SIZE, 25).
 -define(DEFAULT_MAX_FREE_CONNECTIONS, 5).
@@ -103,20 +116,24 @@ init([PoolOpts]) ->
 
 -spec handle_call
     ({acquire, worker_args()}, _From, state()) ->
-        {reply, {ok, worker()} | {error, pool_unavailable | {worker_init_failed, _}}, state()};
+        {reply, {ok, worker()} | {error, pool_unavailable | {worker_init_failed, _}}, state()} |
+        {noreply, state()};
     ({free, worker()}, _From, state()) -> {reply, ok | {error, invalid_worker}, state()}.
-handle_call({acquire, WorkerArgs0}, {ClientPid, _}, St0 = #{worker_factory_handler := FactoryHandler}) ->
-    {GroupID, WorkerArgs1} = gunner_worker_factory:on_acquire(FactoryHandler, WorkerArgs0),
+handle_call({acquire, WorkerArgs}, {ClientPid, _} = From, St0) ->
+    GroupID = create_group_id(WorkerArgs),
     St1 = ensure_group_exists(GroupID, St0),
-    try
-        St2 = maybe_expand_pool(GroupID, WorkerArgs1, St1),
-        {Worker, St3} = handle_acquire(GroupID, ClientPid, St2),
-        {reply, {ok, Worker}, St3}
-    catch
-        throw:pool_unavailable ->
-            {reply, {error, pool_unavailable}, St0};
-        throw:{worker_init_failed, Reason} ->
-            {reply, {error, {worker_init_failed, Reason}}, St0}
+    case handle_acquire(GroupID, ClientPid, St1) of
+        {ok, {worker, WorkerPid}, St2} ->
+            {reply, {ok, WorkerPid}, St2};
+        {ok, no_worker} ->
+            case handle_worker_start(GroupID, WorkerArgs, From, St1) of
+                {ok, St2} ->
+                    {noreply, St2};
+                {error, _Reason} = Error ->
+                    {reply, Error, St0}
+            end;
+        {error, pool_unavailable} ->
+            {reply, {error, pool_unavailable}, St0}
     end;
 handle_call({free, Worker}, {ClientPid, _}, St0) ->
     try handle_free(Worker, ClientPid, St0) of
@@ -140,8 +157,11 @@ handle_cast(_Cast, _St) ->
     erlang:error(unexpected_cast).
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
-handle_info({'DOWN', _Mref, process, Pid, _Reason}, St0) ->
-    St1 = handle_process_down(Pid, St0),
+handle_info({gun_up, Pid, _Protocol}, St0) ->
+    St1 = handle_worker_started(Pid, St0),
+    {noreply, St1};
+handle_info({'DOWN', _Mref, process, Pid, Reason}, St0) ->
+    St1 = handle_process_down(Pid, Reason, St0),
     {noreply, St1};
 handle_info(_, St0) ->
     {noreply, St0}.
@@ -150,17 +170,35 @@ handle_info(_, St0) ->
 %% Internal functions
 %%
 
--spec handle_acquire(worker_group_id(), pid(), state()) -> {worker(), state()} | no_return().
-handle_acquire(GroupID, ClientPid, St0 = #{worker_groups := WorkerGroups0, clients := Clients0}) ->
-    {Worker, WorkerGroups1} = fetch_next_worker(GroupID, WorkerGroups0),
-    Clients1 = register_client_lease(ClientPid, Worker, GroupID, Clients0),
-    {Worker, St0#{worker_groups => WorkerGroups1, clients => Clients1}}.
+-spec create_group_id(worker_args()) -> worker_group_id().
+create_group_id(WorkerArgs) ->
+    WorkerArgs.
 
--spec fetch_next_worker(worker_group_id(), worker_groups()) -> {worker(), worker_groups()}.
+-spec handle_acquire(worker_group_id(), pid(), state()) ->
+    {ok, {worker, worker()}, state()} | {ok, no_worker} | {error, pool_unavailable}.
+handle_acquire(GroupID, ClientPid, St = #{worker_groups := WorkerGroups0, clients := Clients0}) ->
+    case fetch_next_worker(GroupID, WorkerGroups0) of
+        {ok, Worker, WorkerGroups1} ->
+            Clients1 = register_client_lease(ClientPid, Worker, GroupID, Clients0),
+            {ok, {worker, Worker}, St#{worker_groups => WorkerGroups1, clients => Clients1}};
+        {error, no_available_workers} ->
+            case assert_pool_available(St) of
+                ok -> {ok, no_worker};
+                error -> {error, pool_unavailable}
+            end
+    end.
+
+-spec fetch_next_worker(worker_group_id(), worker_groups()) ->
+    {ok, worker(), worker_groups()} | {error, no_available_workers}.
 fetch_next_worker(GroupID, WorkerGroups) ->
     Group0 = get_worker_group_by_id(GroupID, WorkerGroups),
-    {Worker, Group1} = get_next_worker(Group0),
-    {Worker, update_worker_group(GroupID, Group1, WorkerGroups)}.
+    case is_worker_group_empty(Group0) of
+        false ->
+            {Worker, Group1} = get_next_worker(Group0),
+            {ok, Worker, update_worker_group(GroupID, Group1, WorkerGroups)};
+        true ->
+            {error, no_available_workers}
+    end.
 
 -spec register_client_lease(client_pid(), worker(), worker_group_id(), clients()) -> clients().
 register_client_lease(ClientPid, Worker, GroupID, Clients0) ->
@@ -180,7 +218,56 @@ ensure_client_state_exists(ClientPid, Clients) ->
 
 -spec add_new_client_state(client_pid(), clients()) -> clients().
 add_new_client_state(ClientPid, Clients) ->
-    update_client_state(ClientPid, create_client_state(), Clients).
+    update_client_state(ClientPid, create_client_state(ClientPid), Clients).
+
+-spec assert_pool_available(state()) -> ok | error.
+assert_pool_available(#{size := PoolSize}) ->
+    case get_max_pool_size() of
+        MaxPoolSize when PoolSize < MaxPoolSize ->
+            ok;
+        _ ->
+            error
+    end.
+
+-spec handle_worker_start(worker_group_id(), worker_args(), From :: from(), state()) ->
+    {ok, state()} | {error, {worker_init_failed, Reason :: term()}}.
+handle_worker_start(GroupID, WorkerArgs, From, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
+    case create_new_worker(WorkerArgs) of
+        {ok, WorkerPid} ->
+            _ = erlang:monitor(process, WorkerPid),
+            WorkerRequests1 = add_worker_request(WorkerPid, GroupID, From, WorkerRequests0),
+            {ok, St#{size => PoolSize + 1, worker_requests => WorkerRequests1}};
+        {error, Reason} ->
+            {error, {worker_init_failed, Reason}}
+    end.
+
+-spec create_new_worker(worker_args()) -> {ok, worker()} | {error, Reason :: any()}.
+create_new_worker({Host, Port}) ->
+    ClientOpts = get_gun_client_opts(),
+    gun:open(Host, Port, ClientOpts#{retry => 0}).
+
+-spec handle_worker_started(worker(), state()) -> state().
+handle_worker_started(WorkerPid, St = #{worker_requests := WorkerRequests0, clients := Clients0}) ->
+    case get_worker_request_by_pid(WorkerPid, WorkerRequests0) of
+        {GroupID, {ClientPid, _} = From} ->
+            WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
+            Clients1 = register_client_lease(ClientPid, WorkerPid, GroupID, Clients0),
+            ok = gen_server:reply(From, {ok, WorkerPid}),
+            St#{worker_requests := WorkerRequests1, clients := Clients1};
+        undefined ->
+            St
+    end.
+
+-spec handle_worker_start_failed(worker(), Reason :: term(), state()) -> state().
+handle_worker_start_failed(WorkerPid, Reason, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
+    case get_worker_request_by_pid(WorkerPid, WorkerRequests0) of
+        {_GroupID, From} ->
+            WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
+            ok = gen_server:reply(From, {error, {worker_init_failed, Reason}}),
+            St#{size => PoolSize - 1, worker_requests := WorkerRequests1};
+        undefined ->
+            St
+    end.
 
 %%
 
@@ -244,9 +331,9 @@ do_cancel_lease(ClientState) ->
 
 %%
 
--spec handle_process_down(worker() | client_pid(), state()) -> state().
-handle_process_down(Pid, St) ->
-    handle_process_down(determine_process_type(Pid, St), Pid, St).
+-spec handle_process_down(worker() | client_pid(), Reason :: term(), state()) -> state().
+handle_process_down(Pid, Reason, St) ->
+    handle_process_down(determine_process_type(Pid, St), Pid, Reason, St).
 
 -spec determine_process_type(worker() | client_pid(), state()) -> worker | client.
 determine_process_type(Pid, #{clients := Clients}) ->
@@ -258,13 +345,23 @@ determine_process_type(Pid, #{clients := Clients}) ->
     end.
 
 -spec handle_process_down
-    (client, client_pid(), state()) -> state();
-    (worker, worker(), state()) -> state().
-handle_process_down(client, ClientPid, St = #{clients := Clients0}) ->
+    (client, client_pid(), Reason :: term(), state()) -> state();
+    (worker, worker(), Reason :: term(), state()) -> state().
+handle_process_down(client, ClientPid, _Reason, St = #{clients := Clients0}) ->
     ClientSt0 = get_client_state_by_pid(ClientPid, Clients0),
-    {Leases, _ClientSt1} = purge_client_leases(ClientSt0),
+    {Leases, ClientSt1} = purge_client_leases(ClientSt0),
+    ok = destroy_client_state(ClientSt1),
     return_all_leases(Leases, St#{clients => remove_client_state(ClientPid, Clients0)});
-handle_process_down(worker, Worker, St = #{worker_groups := Groups0}) ->
+handle_process_down(worker, Worker, Reason, St = #{worker_requests := WorkerRequests0}) ->
+    case worker_request_exists(Worker, WorkerRequests0) of
+        true ->
+            handle_worker_start_failed(Worker, Reason, St);
+        false ->
+            handle_worker_exit(Worker, St)
+    end.
+
+-spec handle_worker_exit(worker(), state()) -> state().
+handle_worker_exit(Worker, St = #{worker_groups := Groups0}) ->
     Groups1 = maps:map(
         fun(_K, Group) ->
             gunner_pool_worker_group:delete_worker(Worker, Group)
@@ -288,7 +385,8 @@ new_state(Opts) ->
         size => 0,
         worker_groups => #{},
         clients => #{},
-        worker_factory_handler => maps:get(worker_factory_handler, Opts, ?DEFAULT_WORKER_FACTORY)
+        worker_factory_handler => maps:get(worker_factory_handler, Opts, ?DEFAULT_WORKER_FACTORY),
+        worker_requests => #{}
     }.
 
 %% Client states
@@ -309,9 +407,9 @@ remove_client_state(ClientPid, Clients) ->
 client_state_exists(ClientPid, Clients) ->
     maps:is_key(ClientPid, Clients).
 
--spec create_client_state() -> client_state().
-create_client_state() ->
-    gunner_pool_client_state:new().
+-spec create_client_state(client_pid()) -> client_state().
+create_client_state(ClientPid) ->
+    gunner_pool_client_state:new(ClientPid).
 
 -spec register_client_lease(worker(), worker_group_id(), client_state()) -> client_state().
 register_client_lease(Worker, GroupID, ClientSt) ->
@@ -330,6 +428,10 @@ cancel_client_lease(ClientSt) ->
 -spec purge_client_leases(client_state()) -> {[{worker(), worker_group_id()}], client_state()}.
 purge_client_leases(ClientSt) ->
     gunner_pool_client_state:purge_leases(ClientSt).
+
+-spec destroy_client_state(client_state()) -> ok | {error, active_leases_present}.
+destroy_client_state(ClientSt) ->
+    gunner_pool_client_state:destroy(ClientSt).
 
 %% Worker groups
 
@@ -365,6 +467,24 @@ add_worker_to_group(Worker, Group) ->
 get_worker_group_size(Group) ->
     gunner_pool_worker_group:size(Group).
 
+%% Worker requests
+
+-spec add_worker_request(worker(), worker_group_id(), From :: _, worker_requests()) -> worker_requests().
+add_worker_request(WorkerPid, GroupID, From, WorkerRequests0) ->
+    WorkerRequests0#{WorkerPid => {GroupID, From}}.
+
+-spec get_worker_request_by_pid(worker(), worker_requests()) -> worker_request() | undefined.
+get_worker_request_by_pid(WorkerPid, WorkerRequests) ->
+    maps:get(WorkerPid, WorkerRequests, undefined).
+
+-spec remove_worker_request(worker(), worker_requests()) -> worker_requests().
+remove_worker_request(WorkerPid, WorkerRequests) ->
+    maps:without([WorkerPid], WorkerRequests).
+
+-spec worker_request_exists(worker(), worker_requests()) -> boolean().
+worker_request_exists(WorkerPid, WorkerRequests) ->
+    maps:is_key(WorkerPid, WorkerRequests).
+
 %%
 
 -spec get_pool_status(state()) -> status_response().
@@ -380,42 +500,6 @@ ensure_group_exists(GroupID, St0 = #{worker_groups := Groups0}) ->
             Groups1 = update_worker_group(GroupID, create_worker_group(), Groups0),
             St0#{worker_groups := Groups1}
     end.
-
--spec maybe_expand_pool(worker_group_id(), worker_args(), state()) -> state() | no_return().
-maybe_expand_pool(GroupID, WorkerArgs, St0 = #{size := PoolSize, worker_factory_handler := FactoryHandler}) ->
-    Group0 = get_state_worker_group(GroupID, St0),
-    case group_needs_expansion(Group0) of
-        true ->
-            _ = assert_pool_available(PoolSize, St0),
-            Group1 = try_expand_group(WorkerArgs, Group0, FactoryHandler),
-            St1 = update_state_worker_group(GroupID, Group1, St0),
-            St1#{size => PoolSize + 1};
-        false ->
-            St0
-    end.
-
--spec assert_pool_available(size(), state()) -> ok | no_return().
-assert_pool_available(PoolSize, _St0) ->
-    case get_max_pool_size() of
-        MaxPoolSize when PoolSize < MaxPoolSize ->
-            ok;
-        _ ->
-            throw(pool_unavailable)
-    end.
-
--spec try_expand_group(worker_args(), worker_group(), module()) -> worker_group() | no_return().
-try_expand_group(WorkerArgs, Group0, FactoryHandler) ->
-    case gunner_worker_factory:create_worker(FactoryHandler, WorkerArgs) of
-        {ok, Worker} ->
-            _ = erlang:monitor(process, Worker),
-            add_worker_to_group(Worker, Group0);
-        {error, Reason} ->
-            throw({worker_init_failed, Reason})
-    end.
-
--spec group_needs_expansion(worker_group()) -> boolean().
-group_needs_expansion(Group) ->
-    is_worker_group_empty(Group).
 
 -spec get_state_worker_group(worker_group_id(), state()) -> worker_group().
 get_state_worker_group(GroupID, #{worker_groups := Groups}) ->
@@ -457,3 +541,7 @@ get_max_pool_size() ->
 
 get_max_free_connections() ->
     genlib_app:env(gunner, group_max_free_connections, ?DEFAULT_MAX_FREE_CONNECTIONS).
+
+-spec get_gun_client_opts() -> gun_client_opts().
+get_gun_client_opts() ->
+    genlib_app:env(gunner, client_opts, ?DEFAULT_CLIENT_OPTS).

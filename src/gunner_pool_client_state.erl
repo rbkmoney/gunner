@@ -5,7 +5,7 @@
 
 %% API functions
 
--export([new/0]).
+-export([new/1]).
 
 -export([register_lease/3]).
 -export([cancel_lease/1]).
@@ -13,10 +13,13 @@
 
 -export([purge_leases/1]).
 
+-export([destroy/1]).
+
 %% API Types
 
 -type state() :: #{
-    worker_leases := worker_leases()
+    worker_leases := worker_leases(),
+    monitor := reference()
 }.
 
 -export_type([state/0]).
@@ -33,10 +36,11 @@
 %% API functions
 %%
 
--spec new() -> state().
-new() ->
+-spec new(pid()) -> state().
+new(ClientPid) ->
     #{
-        worker_leases => []
+        worker_leases => [],
+        monitor => erlang:monitor(process, ClientPid)
     }.
 
 %% @doc Registers a worker lease for this client
@@ -72,6 +76,13 @@ return_lease(Worker, St = #{worker_leases := Leases}) ->
 -spec purge_leases(state()) -> {worker_leases(), state()}.
 purge_leases(St = #{worker_leases := Leases}) ->
     {Leases, St#{worker_leases => []}}.
+
+-spec destroy(state()) -> ok | {error, active_leases_present}.
+destroy(#{monitor := MRef, worker_leases := []}) ->
+    _ = erlang:demonitor(MRef),
+    ok;
+destroy(_) ->
+    {error, active_leases_present}.
 
 %%
 %% Internal functions
