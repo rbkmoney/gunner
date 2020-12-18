@@ -32,13 +32,6 @@ init([]) ->
             type => supervisor,
             restart => permanent,
             shutdown => brutal_kill
-        },
-        #{
-            id => gunner_manager,
-            start => {gunner_manager, start_link, []},
-            type => worker,
-            restart => permanent,
-            shutdown => brutal_kill
         }
     ],
     {ok, {SupFlags, Children}}.

@@ -17,8 +17,8 @@
 -type test_return() :: _ | no_return().
 
 -export([pool_lifetime_test/1]).
-
--define(GUNNER_POOL, default).
+-export([pool_already_exists/1]).
+-export([pool_not_found/1]).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
@@ -30,7 +30,9 @@ all() ->
 groups() ->
     [
         {default, [], [
-            pool_lifetime_test
+            pool_lifetime_test,
+            pool_already_exists,
+            pool_not_found
         ]}
     ].
 
@@ -69,8 +71,17 @@ end_per_testcase(_Name, _C) ->
 
 -spec pool_lifetime_test(config()) -> test_return().
 pool_lifetime_test(_C) ->
-    ?assertEqual(ok, gunner:start_pool(?GUNNER_POOL, #{})),
-    ?assertEqual({error, already_exists}, gunner:start_pool(?GUNNER_POOL, #{})),
-    ?assertMatch({ok, _}, gunner_manager:get_pool(?GUNNER_POOL, 1000)),
-    ?assertEqual(ok, gunner:stop_pool(?GUNNER_POOL)),
-    ?assertEqual({error, not_found}, gunner:stop_pool(?GUNNER_POOL)).
+    ?assertEqual(ok, gunner:start_pool(default, #{})),
+    ?assertMatch({ok, _}, gunner:pool_status(default, 1000)),
+    ?assertEqual(ok, gunner:stop_pool(default)).
+
+-spec pool_already_exists(config()) -> test_return().
+pool_already_exists(_C) ->
+    ?assertEqual(ok, gunner:start_pool(default, #{})),
+    ?assertEqual({error, already_exists}, gunner:start_pool(default, #{})),
+    ?assertEqual(ok, gunner:stop_pool(default)).
+
+-spec pool_not_found(config()) -> test_return().
+pool_not_found(_C) ->
+    ?assertEqual({error, pool_not_found}, gunner:pool_status(default, 1000)),
+    ?assertEqual({error, not_found}, gunner:stop_pool(default)).

@@ -4,7 +4,7 @@
 
 %% API
 -export([start_link/0]).
--export([start_pool/1]).
+-export([start_pool/2]).
 -export([stop_pool/1]).
 
 %% Supervisor callbacks
@@ -19,9 +19,9 @@
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
--spec start_pool(gunner_pool:pool_opts()) -> {ok, pid()} | {error, _}.
-start_pool(PoolOpts) ->
-    supervisor:start_child(?SERVER, [PoolOpts]).
+-spec start_pool(gunner_pool:pool_id(), gunner_pool:pool_opts()) -> {ok, pid()} | {error, _}.
+start_pool(PoolID, PoolOpts) ->
+    supervisor:start_child(?SERVER, [PoolID, PoolOpts]).
 
 -spec stop_pool(pid()) -> ok | {error, term()}.
 stop_pool(Pid) ->

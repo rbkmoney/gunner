@@ -19,7 +19,7 @@
 
 %% Internal types
 
--type worker() :: gunner_worker_factory:worker(_).
+-type worker() :: gunner:worker().
 
 %%
 %% API functions

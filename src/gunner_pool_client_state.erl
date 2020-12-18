@@ -26,7 +26,7 @@
 
 %% Internal Types
 
--type worker() :: gunner_worker_factory:worker(_).
+-type worker() :: gunner:worker().
 -type worker_group_id() :: gunner_pool:worker_group_id().
 
 -type worker_leases() :: [worker_lease()].
