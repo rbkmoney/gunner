@@ -97,7 +97,7 @@ request_ok(_C) ->
 
 -spec request_nxdomain(config()) -> test_return().
 request_nxdomain(_C) ->
-    {error, {worker_init_failed, {shutdown, nxdomain}}} = get(?GUNNER_POOL, "localghost", 8080, <<"/">>).
+    {error, {connection_init_failed, {shutdown, nxdomain}}} = get(?GUNNER_POOL, "localghost", 8080, <<"/">>).
 
 -spec pool_resizing_ok_test(config()) -> test_return().
 pool_resizing_ok_test(_C) ->

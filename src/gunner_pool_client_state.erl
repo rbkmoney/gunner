@@ -18,7 +18,7 @@
 %% API Types
 
 -type state() :: #{
-    worker_leases := worker_leases(),
+    connection_leases := connection_leases(),
     monitor := reference()
 }.
 
@@ -26,11 +26,11 @@
 
 %% Internal Types
 
--type worker() :: gunner:worker().
--type worker_group_id() :: gunner_pool:worker_group_id().
+-type connection() :: gunner:connection().
+-type connection_group_id() :: gunner_pool:connection_group_id().
 
--type worker_leases() :: [worker_lease()].
--type worker_lease() :: {worker(), ReturnTo :: worker_group_id()}.
+-type connection_leases() :: [connection_lease()].
+-type connection_lease() :: {connection(), ReturnTo :: connection_group_id()}.
 
 %%
 %% API functions
@@ -39,46 +39,46 @@
 -spec new(pid()) -> state().
 new(ClientPid) ->
     #{
-        worker_leases => [],
+        connection_leases => [],
         monitor => erlang:monitor(process, ClientPid)
     }.
 
-%% @doc Registers a worker lease for this client
--spec register_lease(worker(), worker_group_id(), state()) -> state().
-register_lease(Worker, ReturnTo, St = #{worker_leases := Leases}) ->
-    St#{worker_leases => [new_lease(Worker, ReturnTo) | Leases]}.
+%% @doc Registers a connection lease for this client
+-spec register_lease(connection(), connection_group_id(), state()) -> state().
+register_lease(Connection, ReturnTo, St = #{connection_leases := Leases}) ->
+    St#{connection_leases => [new_lease(Connection, ReturnTo) | Leases]}.
 
 %% @doc Cancels last lease for this client
--spec cancel_lease(state()) -> {ok, worker(), worker_group_id(), state()} | {error, no_leases | worker_not_found}.
-cancel_lease(#{worker_leases := []}) ->
+-spec cancel_lease(state()) -> {ok, connection(), connection_group_id(), state()} | {error, no_leases | connection_not_found}.
+cancel_lease(#{connection_leases := []}) ->
     {error, no_leases};
-cancel_lease(St0 = #{worker_leases := [{LastWorker, _} | _]}) ->
-    case return_lease(LastWorker, St0) of
-        {ok, WorkerGroupId, St1} ->
-            {ok, LastWorker, WorkerGroupId, St1};
+cancel_lease(St0 = #{connection_leases := [{LastConnection, _} | _]}) ->
+    case return_lease(LastConnection, St0) of
+        {ok, ConnectionGroupId, St1} ->
+            {ok, LastConnection, ConnectionGroupId, St1};
         {error, _} = Error ->
             Error
     end.
 
-%% @doc Returns the leased worker
--spec return_lease(worker(), state()) -> {ok, worker_group_id(), state()} | {error, no_leases | worker_not_found}.
-return_lease(_Worker, #{worker_leases := []}) ->
+%% @doc Returns the leased connection
+-spec return_lease(connection(), state()) -> {ok, connection_group_id(), state()} | {error, no_leases | connection_not_found}.
+return_lease(_Connection, #{connection_leases := []}) ->
     {error, no_leases};
-return_lease(Worker, St = #{worker_leases := Leases}) ->
-    case find_and_remove_lease(Worker, Leases) of
-        {ok, WorkerGroupId, NewLeases} ->
-            {ok, WorkerGroupId, St#{worker_leases => NewLeases}};
+return_lease(Connection, St = #{connection_leases := Leases}) ->
+    case find_and_remove_lease(Connection, Leases) of
+        {ok, ConnectionGroupId, NewLeases} ->
+            {ok, ConnectionGroupId, St#{connection_leases => NewLeases}};
         {error, _} = Error ->
             Error
     end.
 
 %% @doc Purges all the leases
--spec purge_leases(state()) -> {worker_leases(), state()}.
-purge_leases(St = #{worker_leases := Leases}) ->
-    {Leases, St#{worker_leases => []}}.
+-spec purge_leases(state()) -> {connection_leases(), state()}.
+purge_leases(St = #{connection_leases := Leases}) ->
+    {Leases, St#{connection_leases => []}}.
 
 -spec destroy(state()) -> ok | {error, active_leases_present}.
-destroy(#{monitor := MRef, worker_leases := []}) ->
+destroy(#{monitor := MRef, connection_leases := []}) ->
     _ = erlang:demonitor(MRef),
     ok;
 destroy(_) ->
@@ -88,16 +88,16 @@ destroy(_) ->
 %% Internal functions
 %%
 
--spec new_lease(worker(), worker_group_id()) -> worker_lease().
-new_lease(Worker, ReturnTo) ->
-    {Worker, ReturnTo}.
+-spec new_lease(connection(), connection_group_id()) -> connection_lease().
+new_lease(Connection, ReturnTo) ->
+    {Connection, ReturnTo}.
 
--spec find_and_remove_lease(worker(), worker_leases()) ->
-    {ok, worker_group_id(), worker_leases()} | {error, worker_not_found}.
-find_and_remove_lease(Worker, Leases) ->
-    case lists:keytake(Worker, 1, Leases) of
+-spec find_and_remove_lease(connection(), connection_leases()) ->
+    {ok, connection_group_id(), connection_leases()} | {error, connection_not_found}.
+find_and_remove_lease(Connection, Leases) ->
+    case lists:keytake(Connection, 1, Leases) of
         {value, {_, ReturnTo}, NewLeases} ->
             {ok, ReturnTo, NewLeases};
         false ->
-            {error, worker_not_found}
+            {error, connection_not_found}
     end.

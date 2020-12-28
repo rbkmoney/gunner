@@ -28,30 +28,30 @@
 -type pool_id() :: atom().
 -type pool_opts() :: #{}.
 
--type worker_group_id() :: term().
+-type connection_group_id() :: term().
 
 -type status_response() :: #{current_size := size()}.
 
 -export_type([pool/0]).
 -export_type([pool_id/0]).
 -export_type([pool_opts/0]).
--export_type([worker_group_id/0]).
+-export_type([connection_group_id/0]).
 -export_type([status_response/0]).
 
 %% Internal types
 
 -type state() :: #{
     size := size(),
-    worker_groups := worker_groups(),
+    connection_groups := connection_groups(),
     clients := clients(),
-    worker_requests := worker_requests()
+    connection_requests := connection_requests()
 }.
 
--type worker_groups() :: #{
-    worker_group_id() => worker_group()
+-type connection_groups() :: #{
+    connection_group_id() => connection_group()
 }.
 
--type worker_group() :: gunner_pool_worker_group:state().
+-type connection_group() :: gunner_pool_connection_group:state().
 
 -type clients() :: #{
     client_pid() => client_state()
@@ -60,16 +60,16 @@
 -type client_pid() :: pid().
 -type client_state() :: gunner_pool_client_state:state().
 
--type worker_requests() :: #{
-    worker() => worker_request()
+-type connection_requests() :: #{
+    connection() => connection_request()
 }.
 
--type worker_request() :: {worker_group_id(), TargetClient :: from()}.
+-type connection_request() :: {connection_group_id(), TargetClient :: from()}.
 
 -type size() :: non_neg_integer().
 
--type worker() :: gunner:worker().
--type worker_args() :: gunner:worker_args().
+-type connection() :: gunner:connection().
+-type connection_args() :: gunner:connection_args().
 
 -type gun_client_opts() :: gun:opts().
 
@@ -112,19 +112,19 @@ start_link(PoolID, PoolOpts) ->
 
 %%
 
--spec acquire(pool_id(), worker_args(), timeout()) ->
-    {ok, worker()} | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
-acquire(PoolID, WorkerArgs, Timeout) ->
-    call_pool(PoolID, {acquire, WorkerArgs}, Timeout).
+-spec acquire(pool_id(), connection_args(), timeout()) ->
+    {ok, connection()} | {error, pool_not_found | pool_unavailable | {connection_init_failed, _}}.
+acquire(PoolID, ConnectionArgs, Timeout) ->
+    call_pool(PoolID, {acquire, ConnectionArgs}, Timeout).
 
 -spec cancel_acquire(pool_id()) -> ok.
 cancel_acquire(PoolID) ->
     gen_server:cast(via_tuple(PoolID), {cancel_acquire, self()}).
 
--spec free(pool_id(), worker(), timeout()) ->
-    ok | {error, pool_not_found | {client, not_found} | {worker, {lease_return_failed, _Reason}}}.
-free(PoolID, Worker, Timeout) ->
-    call_pool(PoolID, {free, Worker}, Timeout).
+-spec free(pool_id(), connection(), timeout()) ->
+    ok | {error, pool_not_found | {client, not_found} | {connection, {lease_return_failed, _Reason}}}.
+free(PoolID, Connection, Timeout) ->
+    call_pool(PoolID, {free, Connection}, Timeout).
 
 -spec pool_status(pool_id(), timeout()) -> {ok, status_response()} | {error, pool_not_found}.
 pool_status(PoolID, Timeout) ->
@@ -172,19 +172,19 @@ init([PoolOpts]) ->
     {ok, new_state(PoolOpts)}.
 
 -spec handle_call
-    ({acquire, worker_args()}, from(), state()) ->
-        {reply, {ok, worker()} | {error, pool_unavailable | {worker_init_failed, _}}, state()} |
+    ({acquire, connection_args()}, from(), state()) ->
+        {reply, {ok, connection()} | {error, pool_unavailable | {connection_init_failed, _}}, state()} |
         {noreply, state()};
-    ({free, worker()}, from(), state()) ->
-        {reply, ok | {error, {client, not_found} | {worker, {lease_return_failed, _Reason}}}, state()}.
-handle_call({acquire, WorkerArgs}, {ClientPid, _} = From, St0) ->
-    GroupID = create_group_id(WorkerArgs),
+    ({free, connection()}, from(), state()) ->
+        {reply, ok | {error, {client, not_found} | {connection, {lease_return_failed, _Reason}}}, state()}.
+handle_call({acquire, ConnectionArgs}, {ClientPid, _} = From, St0) ->
+    GroupID = create_group_id(ConnectionArgs),
     St1 = ensure_group_exists(GroupID, St0),
     case handle_acquire(GroupID, ClientPid, St1) of
-        {ok, {worker, WorkerPid}, St2} ->
-            {reply, {ok, WorkerPid}, St2};
-        {ok, no_worker} ->
-            case handle_worker_start(GroupID, WorkerArgs, From, St1) of
+        {ok, {connection, ConnectionPid}, St2} ->
+            {reply, {ok, ConnectionPid}, St2};
+        {ok, no_connection} ->
+            case handle_connection_start(GroupID, ConnectionArgs, From, St1) of
                 {ok, St2} ->
                     {noreply, St2};
                 {error, _Reason} = Error ->
@@ -193,14 +193,14 @@ handle_call({acquire, WorkerArgs}, {ClientPid, _} = From, St0) ->
         {error, pool_unavailable} ->
             {reply, {error, pool_unavailable}, St0}
     end;
-handle_call({free, Worker}, {ClientPid, _}, St0) ->
-    case handle_free(Worker, ClientPid, St0) of
+handle_call({free, Connection}, {ClientPid, _}, St0) ->
+    case handle_free(Connection, ClientPid, St0) of
         {ok, St1} ->
             {reply, ok, St1};
         {error, client_state_not_found} ->
             {reply, {error, {client, not_found}}, St0};
         {error, {lease_return_failed, _} = Reason} ->
-            {reply, {error, {worker, Reason}}, St0}
+            {reply, {error, {connection, Reason}}, St0}
     end;
 handle_call(status, _From, St0) ->
     {reply, {ok, get_pool_status(St0)}, St0};
@@ -221,7 +221,7 @@ handle_cast(_Cast, _St) ->
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({gun_up, Pid, _Protocol}, St0) ->
-    St1 = handle_worker_start_success(Pid, St0),
+    St1 = handle_connection_start_success(Pid, St0),
     {noreply, St1};
 handle_info({'DOWN', _Mref, process, Pid, Reason}, St0) ->
     St1 = handle_process_down(Pid, Reason, St0),
@@ -233,41 +233,41 @@ handle_info(_, St0) ->
 %% Internal functions
 %%
 
--spec create_group_id(worker_args()) -> worker_group_id().
-create_group_id(WorkerArgs) ->
-    WorkerArgs.
+-spec create_group_id(connection_args()) -> connection_group_id().
+create_group_id(ConnectionArgs) ->
+    ConnectionArgs.
 
--spec handle_acquire(worker_group_id(), pid(), state()) ->
-    {ok, {worker, worker()}, state()} | {ok, no_worker} | {error, pool_unavailable}.
-handle_acquire(GroupID, ClientPid, St = #{worker_groups := WorkerGroups0, clients := Clients0}) ->
-    case fetch_next_worker(GroupID, WorkerGroups0) of
-        {ok, Worker, WorkerGroups1} ->
-            Clients1 = register_client_lease(ClientPid, Worker, GroupID, Clients0),
-            {ok, {worker, Worker}, St#{worker_groups => WorkerGroups1, clients => Clients1}};
-        {error, no_available_workers} ->
+-spec handle_acquire(connection_group_id(), pid(), state()) ->
+    {ok, {connection, connection()}, state()} | {ok, no_connection} | {error, pool_unavailable}.
+handle_acquire(GroupID, ClientPid, St = #{connection_groups := ConnectionGroups0, clients := Clients0}) ->
+    case fetch_next_connection(GroupID, ConnectionGroups0) of
+        {ok, Connection, ConnectionGroups1} ->
+            Clients1 = register_client_lease(ClientPid, Connection, GroupID, Clients0),
+            {ok, {connection, Connection}, St#{connection_groups => ConnectionGroups1, clients => Clients1}};
+        {error, no_available_connections} ->
             case assert_pool_available(St) of
-                ok -> {ok, no_worker};
+                ok -> {ok, no_connection};
                 error -> {error, pool_unavailable}
             end
     end.
 
--spec fetch_next_worker(worker_group_id(), worker_groups()) ->
-    {ok, worker(), worker_groups()} | {error, no_available_workers}.
-fetch_next_worker(GroupID, WorkerGroups) ->
-    Group0 = get_worker_group_by_id(GroupID, WorkerGroups),
-    case is_worker_group_empty(Group0) of
+-spec fetch_next_connection(connection_group_id(), connection_groups()) ->
+    {ok, connection(), connection_groups()} | {error, no_available_connections}.
+fetch_next_connection(GroupID, ConnectionGroups) ->
+    Group0 = get_connection_group_by_id(GroupID, ConnectionGroups),
+    case is_connection_group_empty(Group0) of
         false ->
-            {Worker, Group1} = get_next_worker(Group0),
-            {ok, Worker, update_worker_group(GroupID, Group1, WorkerGroups)};
+            {Connection, Group1} = get_next_connection(Group0),
+            {ok, Connection, update_connection_group(GroupID, Group1, ConnectionGroups)};
         true ->
-            {error, no_available_workers}
+            {error, no_available_connections}
     end.
 
--spec register_client_lease(client_pid(), worker(), worker_group_id(), clients()) -> clients().
-register_client_lease(ClientPid, Worker, GroupID, Clients0) ->
+-spec register_client_lease(client_pid(), connection(), connection_group_id(), clients()) -> clients().
+register_client_lease(ClientPid, Connection, GroupID, Clients0) ->
     Clients1 = ensure_client_state_exists(ClientPid, Clients0),
     ClientSt0 = get_client_state_by_pid(ClientPid, Clients1),
-    ClientSt1 = register_client_lease(Worker, GroupID, ClientSt0),
+    ClientSt1 = register_client_lease(Connection, GroupID, ClientSt0),
     update_client_state(ClientPid, ClientSt1, Clients1).
 
 -spec ensure_client_state_exists(client_pid(), clients()) -> clients().
@@ -292,53 +292,53 @@ assert_pool_available(#{size := PoolSize}) ->
             error
     end.
 
--spec handle_worker_start(worker_group_id(), worker_args(), From :: from(), state()) ->
-    {ok, state()} | {error, {worker_init_failed, Reason :: term()}}.
-handle_worker_start(GroupID, WorkerArgs, From, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
-    case create_worker(WorkerArgs) of
-        {ok, WorkerPid} ->
-            _ = erlang:monitor(process, WorkerPid),
-            WorkerRequests1 = add_worker_request(WorkerPid, GroupID, From, WorkerRequests0),
-            {ok, St#{size => PoolSize + 1, worker_requests => WorkerRequests1}};
+-spec handle_connection_start(connection_group_id(), connection_args(), From :: from(), state()) ->
+    {ok, state()} | {error, {connection_init_failed, Reason :: term()}}.
+handle_connection_start(GroupID, ConnectionArgs, From, St = #{size := PoolSize, connection_requests := ConnectionRequests0}) ->
+    case create_connection(ConnectionArgs) of
+        {ok, ConnectionPid} ->
+            _ = erlang:monitor(process, ConnectionPid),
+            ConnectionRequests1 = add_connection_request(ConnectionPid, GroupID, From, ConnectionRequests0),
+            {ok, St#{size => PoolSize + 1, connection_requests => ConnectionRequests1}};
         {error, Reason} ->
-            {error, {worker_init_failed, Reason}}
+            {error, {connection_init_failed, Reason}}
     end.
 
--spec handle_worker_start_success(worker(), state()) -> state().
-handle_worker_start_success(WorkerPid, St = #{worker_requests := WorkerRequests0, clients := Clients0}) ->
-    {GroupID, {ClientPid, _} = From} = get_worker_request_by_pid(WorkerPid, WorkerRequests0),
-    WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
-    Clients1 = register_client_lease(ClientPid, WorkerPid, GroupID, Clients0),
-    ok = gen_server:reply(From, {ok, WorkerPid}),
-    St#{worker_requests := WorkerRequests1, clients := Clients1}.
+-spec handle_connection_start_success(connection(), state()) -> state().
+handle_connection_start_success(ConnectionPid, St = #{connection_requests := ConnectionRequests0, clients := Clients0}) ->
+    {GroupID, {ClientPid, _} = From} = get_connection_request_by_pid(ConnectionPid, ConnectionRequests0),
+    ConnectionRequests1 = remove_connection_request(ConnectionPid, ConnectionRequests0),
+    Clients1 = register_client_lease(ClientPid, ConnectionPid, GroupID, Clients0),
+    ok = gen_server:reply(From, {ok, ConnectionPid}),
+    St#{connection_requests := ConnectionRequests1, clients := Clients1}.
 
--spec handle_worker_start_fail(worker(), Reason :: term(), state()) -> state().
-handle_worker_start_fail(WorkerPid, Reason, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
-    {_GroupID, From} = get_worker_request_by_pid(WorkerPid, WorkerRequests0),
-    WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
-    ok = gen_server:reply(From, {error, {worker_init_failed, Reason}}),
-    St#{size => PoolSize - 1, worker_requests := WorkerRequests1}.
+-spec handle_connection_start_fail(connection(), Reason :: term(), state()) -> state().
+handle_connection_start_fail(ConnectionPid, Reason, St = #{size := PoolSize, connection_requests := ConnectionRequests0}) ->
+    {_GroupID, From} = get_connection_request_by_pid(ConnectionPid, ConnectionRequests0),
+    ConnectionRequests1 = remove_connection_request(ConnectionPid, ConnectionRequests0),
+    ok = gen_server:reply(From, {error, {connection_init_failed, Reason}}),
+    St#{size => PoolSize - 1, connection_requests := ConnectionRequests1}.
 
 %%
 
--spec handle_free(worker(), client_pid(), state()) ->
+-spec handle_free(connection(), client_pid(), state()) ->
     {ok, state()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
-handle_free(Worker, ClientPid, St = #{worker_groups := WorkerGroups0, clients := Clients0}) ->
-    case return_lease(Worker, ClientPid, Clients0) of
+handle_free(Connection, ClientPid, St = #{connection_groups := ConnectionGroups0, clients := Clients0}) ->
+    case return_lease(Connection, ClientPid, Clients0) of
         {ok, GroupID, Clients1} ->
-            WorkerGroups1 = return_worker(Worker, GroupID, WorkerGroups0),
-            St1 = maybe_shrink_pool(GroupID, St#{worker_groups => WorkerGroups1, clients => Clients1}),
+            ConnectionGroups1 = return_connection(Connection, GroupID, ConnectionGroups0),
+            St1 = maybe_shrink_pool(GroupID, St#{connection_groups => ConnectionGroups1, clients => Clients1}),
             {ok, St1};
         {error, _Reason} = Error ->
             Error
     end.
 
--spec return_lease(worker(), client_pid(), clients()) ->
-    {ok, worker_group_id(), clients()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
-return_lease(Worker, ClientPid, Clients) ->
+-spec return_lease(connection(), client_pid(), clients()) ->
+    {ok, connection_group_id(), clients()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
+return_lease(Connection, ClientPid, Clients) ->
     case get_client_state_by_pid(ClientPid, Clients) of
         ClientState0 when ClientState0 =/= undefined ->
-            case do_return_lease(Worker, ClientState0) of
+            case do_return_lease(Connection, ClientState0) of
                 {ok, GroupID, ClientState1} ->
                     {ok, GroupID, update_client_state(ClientPid, ClientState1, Clients)};
                 {error, Reason} ->
@@ -348,44 +348,44 @@ return_lease(Worker, ClientPid, Clients) ->
             {error, client_state_not_found}
     end.
 
--spec do_return_lease(worker(), client_state()) ->
-    {ok, worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
-do_return_lease(Worker, ClientState) ->
-    case return_client_lease(Worker, ClientState) of
-        {ok, WorkerGroupId, NewClientState} ->
-            {ok, WorkerGroupId, NewClientState};
+-spec do_return_lease(connection(), client_state()) ->
+    {ok, connection_group_id(), client_state()} | {error, no_leases | connection_not_found}.
+do_return_lease(Connection, ClientState) ->
+    case return_client_lease(Connection, ClientState) of
+        {ok, ConnectionGroupId, NewClientState} ->
+            {ok, ConnectionGroupId, NewClientState};
         {error, _Reason} = Error ->
             Error
     end.
 
--spec return_worker(worker(), worker_group_id(), worker_groups()) -> worker_groups().
-return_worker(Worker, GroupID, WorkerGroups) ->
-    Group0 = get_worker_group_by_id(GroupID, WorkerGroups),
-    Group1 = add_worker_to_group(Worker, Group0),
-    update_worker_group(GroupID, Group1, WorkerGroups).
+-spec return_connection(connection(), connection_group_id(), connection_groups()) -> connection_groups().
+return_connection(Connection, GroupID, ConnectionGroups) ->
+    Group0 = get_connection_group_by_id(GroupID, ConnectionGroups),
+    Group1 = add_connection_to_group(Connection, Group0),
+    update_connection_group(GroupID, Group1, ConnectionGroups).
 
 %%
 
 -spec handle_cancel(client_pid(), state()) ->
     {ok, state()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
-handle_cancel(ClientPid, St = #{worker_groups := WorkerGroups0, clients := Clients0}) ->
+handle_cancel(ClientPid, St = #{connection_groups := ConnectionGroups0, clients := Clients0}) ->
     case cancel_lease(ClientPid, Clients0) of
-        {ok, Worker, GroupID, Clients1} ->
-            WorkerGroups1 = return_worker(Worker, GroupID, WorkerGroups0),
-            St1 = maybe_shrink_pool(GroupID, St#{worker_groups => WorkerGroups1, clients => Clients1}),
+        {ok, Connection, GroupID, Clients1} ->
+            ConnectionGroups1 = return_connection(Connection, GroupID, ConnectionGroups0),
+            St1 = maybe_shrink_pool(GroupID, St#{connection_groups => ConnectionGroups1, clients => Clients1}),
             {ok, St1};
         {error, _Reason} = Error ->
             Error
     end.
 
 -spec cancel_lease(client_pid(), clients()) ->
-    {ok, worker(), worker_group_id(), clients()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
+    {ok, connection(), connection_group_id(), clients()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
 cancel_lease(ClientPid, Clients) ->
     case get_client_state_by_pid(ClientPid, Clients) of
         ClientState0 when ClientState0 =/= undefined ->
             case cancel_client_lease(ClientState0) of
-                {ok, Worker, GroupID, ClientState1} ->
-                    {ok, Worker, GroupID, update_client_state(ClientPid, ClientState1, Clients)};
+                {ok, Connection, GroupID, ClientState1} ->
+                    {ok, Connection, GroupID, update_client_state(ClientPid, ClientState1, Clients)};
                 {error, Reason} ->
                     {error, {lease_return_failed, Reason}}
             end;
@@ -395,50 +395,50 @@ cancel_lease(ClientPid, Clients) ->
 
 %%
 
--spec handle_process_down(worker() | client_pid(), Reason :: term(), state()) -> state().
+-spec handle_process_down(connection() | client_pid(), Reason :: term(), state()) -> state().
 handle_process_down(Pid, Reason, St) ->
     handle_process_down(determine_process_type(Pid, St), Pid, Reason, St).
 
--spec determine_process_type(worker() | client_pid(), state()) -> worker | client.
+-spec determine_process_type(connection() | client_pid(), state()) -> connection | client.
 determine_process_type(Pid, #{clients := Clients}) ->
     case client_state_exists(Pid, Clients) of
         true ->
             client;
         false ->
-            worker
+            connection
     end.
 
 -spec handle_process_down
     (client, client_pid(), Reason :: term(), state()) -> state();
-    (worker, worker(), Reason :: term(), state()) -> state().
+    (connection, connection(), Reason :: term(), state()) -> state().
 handle_process_down(client, ClientPid, _Reason, St = #{clients := Clients0}) ->
     ClientSt0 = get_client_state_by_pid(ClientPid, Clients0),
     {Leases, ClientSt1} = purge_client_leases(ClientSt0),
     ok = destroy_client_state(ClientSt1),
     return_all_leases(Leases, St#{clients => remove_client_state(ClientPid, Clients0)});
-handle_process_down(worker, Worker, Reason, St = #{worker_requests := WorkerRequests0}) ->
-    case worker_request_exists(Worker, WorkerRequests0) of
+handle_process_down(connection, Connection, Reason, St = #{connection_requests := ConnectionRequests0}) ->
+    case connection_request_exists(Connection, ConnectionRequests0) of
         true ->
-            handle_worker_start_fail(Worker, Reason, St);
+            handle_connection_start_fail(Connection, Reason, St);
         false ->
-            handle_worker_exit(Worker, St)
+            handle_connection_exit(Connection, St)
     end.
 
--spec handle_worker_exit(worker(), state()) -> state().
-handle_worker_exit(Worker, St = #{worker_groups := Groups0}) ->
+-spec handle_connection_exit(connection(), state()) -> state().
+handle_connection_exit(Connection, St = #{connection_groups := Groups0}) ->
     Groups1 = maps:map(
         fun(_K, Group) ->
-            delete_worker_from_group(Worker, Group)
+            delete_connection_from_group(Connection, Group)
         end,
         Groups0
     ),
-    St#{worker_groups => Groups1}.
+    St#{connection_groups => Groups1}.
 
 return_all_leases([], St) ->
     St;
-return_all_leases([{Worker, WorkerGroupID} | Rest], St = #{worker_groups := WorkerGroups0}) ->
-    WorkerGroups1 = return_worker(Worker, WorkerGroupID, WorkerGroups0),
-    St1 = maybe_shrink_pool(WorkerGroupID, St#{worker_groups => WorkerGroups1}),
+return_all_leases([{Connection, ConnectionGroupID} | Rest], St = #{connection_groups := ConnectionGroups0}) ->
+    ConnectionGroups1 = return_connection(Connection, ConnectionGroupID, ConnectionGroups0),
+    St1 = maybe_shrink_pool(ConnectionGroupID, St#{connection_groups => ConnectionGroups1}),
     return_all_leases(Rest, St1).
 
 %%
@@ -447,9 +447,9 @@ return_all_leases([{Worker, WorkerGroupID} | Rest], St = #{worker_groups := Work
 new_state(_Opts) ->
     #{
         size => 0,
-        worker_groups => #{},
+        connection_groups => #{},
         clients => #{},
-        worker_requests => #{}
+        connection_requests => #{}
     }.
 
 %% Client states
@@ -474,21 +474,21 @@ client_state_exists(ClientPid, Clients) ->
 create_client_state(ClientPid) ->
     gunner_pool_client_state:new(ClientPid).
 
--spec register_client_lease(worker(), worker_group_id(), client_state()) -> client_state().
-register_client_lease(Worker, GroupID, ClientSt) ->
-    gunner_pool_client_state:register_lease(Worker, GroupID, ClientSt).
+-spec register_client_lease(connection(), connection_group_id(), client_state()) -> client_state().
+register_client_lease(Connection, GroupID, ClientSt) ->
+    gunner_pool_client_state:register_lease(Connection, GroupID, ClientSt).
 
--spec return_client_lease(worker(), client_state()) ->
-    {ok, worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
-return_client_lease(Worker, ClientSt) ->
-    gunner_pool_client_state:return_lease(Worker, ClientSt).
+-spec return_client_lease(connection(), client_state()) ->
+    {ok, connection_group_id(), client_state()} | {error, no_leases | connection_not_found}.
+return_client_lease(Connection, ClientSt) ->
+    gunner_pool_client_state:return_lease(Connection, ClientSt).
 
 -spec cancel_client_lease(client_state()) ->
-    {ok, worker(), worker_group_id(), client_state()} | {error, no_leases | worker_not_found}.
+    {ok, connection(), connection_group_id(), client_state()} | {error, no_leases | connection_not_found}.
 cancel_client_lease(ClientSt) ->
     gunner_pool_client_state:cancel_lease(ClientSt).
 
--spec purge_client_leases(client_state()) -> {[{worker(), worker_group_id()}], client_state()}.
+-spec purge_client_leases(client_state()) -> {[{connection(), connection_group_id()}], client_state()}.
 purge_client_leases(ClientSt) ->
     gunner_pool_client_state:purge_leases(ClientSt).
 
@@ -496,72 +496,72 @@ purge_client_leases(ClientSt) ->
 destroy_client_state(ClientSt) ->
     gunner_pool_client_state:destroy(ClientSt).
 
-%% Worker groups
+%% Connection groups
 
--spec get_worker_group_by_id(worker_group_id(), worker_groups()) -> worker_group() | undefined.
-get_worker_group_by_id(WorkerGroupID, WorkerGroups) ->
-    maps:get(WorkerGroupID, WorkerGroups, undefined).
+-spec get_connection_group_by_id(connection_group_id(), connection_groups()) -> connection_group() | undefined.
+get_connection_group_by_id(ConnectionGroupID, ConnectionGroups) ->
+    maps:get(ConnectionGroupID, ConnectionGroups, undefined).
 
--spec update_worker_group(worker_group_id(), worker_group(), worker_groups()) -> worker_groups().
-update_worker_group(GroupID, Group, WorkerGroups) ->
-    WorkerGroups#{GroupID => Group}.
+-spec update_connection_group(connection_group_id(), connection_group(), connection_groups()) -> connection_groups().
+update_connection_group(GroupID, Group, ConnectionGroups) ->
+    ConnectionGroups#{GroupID => Group}.
 
--spec worker_group_exists(worker_group_id(), worker_groups()) -> boolean().
-worker_group_exists(WorkerGroupID, WorkerGroups) ->
-    maps:is_key(WorkerGroupID, WorkerGroups).
+-spec connection_group_exists(connection_group_id(), connection_groups()) -> boolean().
+connection_group_exists(ConnectionGroupID, ConnectionGroups) ->
+    maps:is_key(ConnectionGroupID, ConnectionGroups).
 
--spec create_worker_group() -> worker_group().
-create_worker_group() ->
-    gunner_pool_worker_group:new().
+-spec create_connection_group() -> connection_group().
+create_connection_group() ->
+    gunner_pool_connection_group:new().
 
--spec is_worker_group_empty(worker_group()) -> boolean().
-is_worker_group_empty(Group) ->
-    gunner_pool_worker_group:is_empty(Group).
+-spec is_connection_group_empty(connection_group()) -> boolean().
+is_connection_group_empty(Group) ->
+    gunner_pool_connection_group:is_empty(Group).
 
--spec get_next_worker(worker_group()) -> {worker(), worker_group()}.
-get_next_worker(Group) ->
-    gunner_pool_worker_group:next_worker(Group).
+-spec get_next_connection(connection_group()) -> {connection(), connection_group()}.
+get_next_connection(Group) ->
+    gunner_pool_connection_group:next_connection(Group).
 
--spec add_worker_to_group(worker(), worker_group()) -> worker_group().
-add_worker_to_group(Worker, Group) ->
-    gunner_pool_worker_group:add_worker(Worker, Group).
+-spec add_connection_to_group(connection(), connection_group()) -> connection_group().
+add_connection_to_group(Connection, Group) ->
+    gunner_pool_connection_group:add_connection(Connection, Group).
 
--spec get_worker_group_size(worker_group()) -> non_neg_integer().
-get_worker_group_size(Group) ->
-    gunner_pool_worker_group:size(Group).
+-spec get_connection_group_size(connection_group()) -> non_neg_integer().
+get_connection_group_size(Group) ->
+    gunner_pool_connection_group:size(Group).
 
--spec delete_worker_from_group(worker(), worker_group()) -> worker_group().
-delete_worker_from_group(Worker, Group) ->
-    gunner_pool_worker_group:delete_worker(Worker, Group).
+-spec delete_connection_from_group(connection(), connection_group()) -> connection_group().
+delete_connection_from_group(Connection, Group) ->
+    gunner_pool_connection_group:delete_connection(Connection, Group).
 
-%% Worker requests
+%% Connection requests
 
--spec add_worker_request(worker(), worker_group_id(), From :: _, worker_requests()) -> worker_requests().
-add_worker_request(WorkerPid, GroupID, From, WorkerRequests0) ->
-    WorkerRequests0#{WorkerPid => {GroupID, From}}.
+-spec add_connection_request(connection(), connection_group_id(), From :: _, connection_requests()) -> connection_requests().
+add_connection_request(ConnectionPid, GroupID, From, ConnectionRequests0) ->
+    ConnectionRequests0#{ConnectionPid => {GroupID, From}}.
 
--spec get_worker_request_by_pid(worker(), worker_requests()) -> worker_request() | undefined.
-get_worker_request_by_pid(WorkerPid, WorkerRequests) ->
-    maps:get(WorkerPid, WorkerRequests, undefined).
+-spec get_connection_request_by_pid(connection(), connection_requests()) -> connection_request() | undefined.
+get_connection_request_by_pid(ConnectionPid, ConnectionRequests) ->
+    maps:get(ConnectionPid, ConnectionRequests, undefined).
 
--spec remove_worker_request(worker(), worker_requests()) -> worker_requests().
-remove_worker_request(WorkerPid, WorkerRequests) ->
-    maps:without([WorkerPid], WorkerRequests).
+-spec remove_connection_request(connection(), connection_requests()) -> connection_requests().
+remove_connection_request(ConnectionPid, ConnectionRequests) ->
+    maps:without([ConnectionPid], ConnectionRequests).
 
--spec worker_request_exists(worker(), worker_requests()) -> boolean().
-worker_request_exists(WorkerPid, WorkerRequests) ->
-    maps:is_key(WorkerPid, WorkerRequests).
+-spec connection_request_exists(connection(), connection_requests()) -> boolean().
+connection_request_exists(ConnectionPid, ConnectionRequests) ->
+    maps:is_key(ConnectionPid, ConnectionRequests).
 
-%% Workers
+%% Connections
 
--spec create_worker(worker_args()) -> {ok, worker()} | {error, Reason :: any()}.
-create_worker({Host, Port}) ->
+-spec create_connection(connection_args()) -> {ok, connection()} | {error, Reason :: any()}.
+create_connection({Host, Port}) ->
     ClientOpts = get_gun_client_opts(),
     gun:open(Host, Port, ClientOpts#{retry => 0}).
 
--spec exit_worker(worker()) -> ok.
-exit_worker(WorkerPid) ->
-    ok = gun:shutdown(WorkerPid).
+-spec exit_connection(connection()) -> ok.
+exit_connection(ConnectionPid) ->
+    ok = gun:shutdown(ConnectionPid).
 
 %%
 
@@ -569,40 +569,40 @@ exit_worker(WorkerPid) ->
 get_pool_status(#{size := Size}) ->
     #{current_size => Size}.
 
--spec ensure_group_exists(worker_group_id(), state()) -> state().
-ensure_group_exists(GroupID, St0 = #{worker_groups := Groups0}) ->
-    case worker_group_exists(GroupID, Groups0) of
+-spec ensure_group_exists(connection_group_id(), state()) -> state().
+ensure_group_exists(GroupID, St0 = #{connection_groups := Groups0}) ->
+    case connection_group_exists(GroupID, Groups0) of
         true ->
             St0;
         false ->
-            Groups1 = update_worker_group(GroupID, create_worker_group(), Groups0),
-            St0#{worker_groups := Groups1}
+            Groups1 = update_connection_group(GroupID, create_connection_group(), Groups0),
+            St0#{connection_groups := Groups1}
     end.
 
--spec maybe_shrink_pool(worker_group_id(), state()) -> state().
-maybe_shrink_pool(GroupID, St0 = #{size := PoolSize, worker_groups := Groups0}) ->
-    Group0 = get_worker_group_by_id(GroupID, Groups0),
+-spec maybe_shrink_pool(connection_group_id(), state()) -> state().
+maybe_shrink_pool(GroupID, St0 = #{size := PoolSize, connection_groups := Groups0}) ->
+    Group0 = get_connection_group_by_id(GroupID, Groups0),
     case group_needs_shrinking(Group0) of
         true ->
             Group1 = do_shrink_group(Group0),
-            St0#{size => PoolSize - 1, worker_groups => update_worker_group(GroupID, Group1, Groups0)};
+            St0#{size => PoolSize - 1, connection_groups => update_connection_group(GroupID, Group1, Groups0)};
         false ->
             St0
     end.
 
--spec group_needs_shrinking(worker_group()) -> boolean().
+-spec group_needs_shrinking(connection_group()) -> boolean().
 group_needs_shrinking(Group) ->
     MaxFreeGroupConnections = get_max_free_connections(),
-    is_worker_group_full(Group, MaxFreeGroupConnections).
+    is_connection_group_full(Group, MaxFreeGroupConnections).
 
--spec is_worker_group_full(worker_group(), Max :: non_neg_integer()) -> boolean().
-is_worker_group_full(Group, MaxFreeGroupConnections) ->
-    get_worker_group_size(Group) > MaxFreeGroupConnections.
+-spec is_connection_group_full(connection_group(), Max :: non_neg_integer()) -> boolean().
+is_connection_group_full(Group, MaxFreeGroupConnections) ->
+    get_connection_group_size(Group) > MaxFreeGroupConnections.
 
--spec do_shrink_group(worker_group()) -> worker_group().
+-spec do_shrink_group(connection_group()) -> connection_group().
 do_shrink_group(Group0) ->
-    {Worker, Group1} = get_next_worker(Group0),
-    ok = exit_worker(Worker),
+    {Connection, Group1} = get_next_connection(Group0),
+    ok = exit_connection(Connection),
     Group1.
 
 get_max_pool_size() ->

@@ -26,11 +26,11 @@
 
 %% API types
 
--type worker() :: pid().
--type worker_args() :: {conn_host(), conn_port()}.
+-type connection() :: pid().
+-type connection_args() :: {conn_host(), conn_port()}.
 
--export_type([worker/0]).
--export_type([worker_args/0]).
+-export_type([connection/0]).
+-export_type([connection_args/0]).
 
 %% Internal types
 
@@ -40,7 +40,7 @@
 -type conn_host() :: inet:hostname() | inet:ip_address().
 -type conn_port() :: inet:port_number().
 
--type transaction_fun() :: fun((worker()) -> transaction_result()).
+-type transaction_fun() :: fun((connection()) -> transaction_result()).
 -type transaction_result() :: any().
 
 %%
@@ -69,44 +69,44 @@ pool_status(PoolID, Timeout) ->
 
 %%
 
--spec acquire(pool_id(), worker_args()) ->
-    {ok, worker()} | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}} | no_return().
-acquire(PoolID, WorkerArgs) ->
-    acquire(PoolID, WorkerArgs, ?DEFAULT_TIMEOUT).
+-spec acquire(pool_id(), connection_args()) ->
+    {ok, connection()} | {error, pool_not_found | pool_unavailable | {connection_init_failed, _}} | no_return().
+acquire(PoolID, ConnectionArgs) ->
+    acquire(PoolID, ConnectionArgs, ?DEFAULT_TIMEOUT).
 
--spec acquire(pool_id(), worker_args(), timeout()) ->
-    {ok, worker()} | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}} | no_return().
-acquire(PoolID, WorkerArgs, Timeout) ->
+-spec acquire(pool_id(), connection_args(), timeout()) ->
+    {ok, connection()} | {error, pool_not_found | pool_unavailable | {connection_init_failed, _}} | no_return().
+acquire(PoolID, ConnectionArgs, Timeout) ->
     try
-        gunner_pool:acquire(PoolID, WorkerArgs, Timeout)
+        gunner_pool:acquire(PoolID, ConnectionArgs, Timeout)
     catch
         Error:Reason:Stacktrace ->
             ok = gunner_pool:cancel_acquire(PoolID),
             erlang:raise(Error, Reason, Stacktrace)
     end.
 
--spec free(pool_id(), worker()) -> ok | {error, pool_not_found | invalid_worker}.
-free(PoolID, Worker) ->
-    free(PoolID, Worker, ?DEFAULT_TIMEOUT).
+-spec free(pool_id(), connection()) -> ok | {error, pool_not_found | invalid_connection}.
+free(PoolID, Connection) ->
+    free(PoolID, Connection, ?DEFAULT_TIMEOUT).
 
--spec free(pool_id(), worker(), timeout()) -> ok | {error, pool_not_found | invalid_worker}.
-free(PoolID, Worker, Timeout) ->
-    gunner_pool:free(PoolID, Worker, Timeout).
+-spec free(pool_id(), connection(), timeout()) -> ok | {error, pool_not_found | invalid_connection}.
+free(PoolID, Connection, Timeout) ->
+    gunner_pool:free(PoolID, Connection, Timeout).
 
--spec transaction(pool_id(), worker_args(), transaction_fun()) ->
-    transaction_result() | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
-transaction(PoolID, WorkerArgs, TransactionFun) ->
-    transaction(PoolID, WorkerArgs, TransactionFun, ?DEFAULT_TIMEOUT).
+-spec transaction(pool_id(), connection_args(), transaction_fun()) ->
+    transaction_result() | {error, pool_not_found | pool_unavailable | {connection_init_failed, _}}.
+transaction(PoolID, ConnectionArgs, TransactionFun) ->
+    transaction(PoolID, ConnectionArgs, TransactionFun, ?DEFAULT_TIMEOUT).
 
--spec transaction(pool_id(), worker_args(), transaction_fun(), timeout()) ->
-    transaction_result() | {error, pool_not_found | pool_unavailable | {worker_init_failed, _}}.
-transaction(PoolID, WorkerArgs, TransactionFun, Timeout) ->
-    case acquire(PoolID, WorkerArgs, Timeout) of
-        {ok, Worker} ->
+-spec transaction(pool_id(), connection_args(), transaction_fun(), timeout()) ->
+    transaction_result() | {error, pool_not_found | pool_unavailable | {connection_init_failed, _}}.
+transaction(PoolID, ConnectionArgs, TransactionFun, Timeout) ->
+    case acquire(PoolID, ConnectionArgs, Timeout) of
+        {ok, Connection} ->
             try
-                TransactionFun(Worker)
+                TransactionFun(Connection)
             after
-                ok = free(PoolID, Worker, Timeout)
+                ok = free(PoolID, Connection, Timeout)
             end;
         {error, _} = Error ->
             Error
