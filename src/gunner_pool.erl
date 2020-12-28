@@ -314,7 +314,7 @@ handle_worker_start_success(WorkerPid, St = #{worker_requests := WorkerRequests0
 
 -spec handle_worker_start_fail(worker(), Reason :: term(), state()) -> state().
 handle_worker_start_fail(WorkerPid, Reason, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
-    {_GroupID, From} = get_worker_request_by_pid(WorkerPid, WorkerRequests0) of
+    {_GroupID, From} = get_worker_request_by_pid(WorkerPid, WorkerRequests0),
     WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
     ok = gen_server:reply(From, {error, {worker_init_failed, Reason}}),
     St#{size => PoolSize - 1, worker_requests := WorkerRequests1}.
