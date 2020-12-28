@@ -221,7 +221,7 @@ handle_cast(_Cast, _St) ->
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info({gun_up, Pid, _Protocol}, St0) ->
-    St1 = handle_worker_started(Pid, St0),
+    St1 = handle_worker_start_success(Pid, St0),
     {noreply, St1};
 handle_info({'DOWN', _Mref, process, Pid, Reason}, St0) ->
     St1 = handle_process_down(Pid, Reason, St0),
@@ -304,28 +304,20 @@ handle_worker_start(GroupID, WorkerArgs, From, St = #{size := PoolSize, worker_r
             {error, {worker_init_failed, Reason}}
     end.
 
--spec handle_worker_started(worker(), state()) -> state().
-handle_worker_started(WorkerPid, St = #{worker_requests := WorkerRequests0, clients := Clients0}) ->
-    case get_worker_request_by_pid(WorkerPid, WorkerRequests0) of
-        {GroupID, {ClientPid, _} = From} ->
-            WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
-            Clients1 = register_client_lease(ClientPid, WorkerPid, GroupID, Clients0),
-            ok = gen_server:reply(From, {ok, WorkerPid}),
-            St#{worker_requests := WorkerRequests1, clients := Clients1};
-        undefined ->
-            St
-    end.
+-spec handle_worker_start_success(worker(), state()) -> state().
+handle_worker_start_success(WorkerPid, St = #{worker_requests := WorkerRequests0, clients := Clients0}) ->
+    {GroupID, {ClientPid, _} = From} = get_worker_request_by_pid(WorkerPid, WorkerRequests0),
+    WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
+    Clients1 = register_client_lease(ClientPid, WorkerPid, GroupID, Clients0),
+    ok = gen_server:reply(From, {ok, WorkerPid}),
+    St#{worker_requests := WorkerRequests1, clients := Clients1}.
 
--spec handle_worker_start_failed(worker(), Reason :: term(), state()) -> state().
-handle_worker_start_failed(WorkerPid, Reason, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
-    case get_worker_request_by_pid(WorkerPid, WorkerRequests0) of
-        {_GroupID, From} ->
-            WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
-            ok = gen_server:reply(From, {error, {worker_init_failed, Reason}}),
-            St#{size => PoolSize - 1, worker_requests := WorkerRequests1};
-        undefined ->
-            St
-    end.
+-spec handle_worker_start_fail(worker(), Reason :: term(), state()) -> state().
+handle_worker_start_fail(WorkerPid, Reason, St = #{size := PoolSize, worker_requests := WorkerRequests0}) ->
+    {_GroupID, From} = get_worker_request_by_pid(WorkerPid, WorkerRequests0) of
+    WorkerRequests1 = remove_worker_request(WorkerPid, WorkerRequests0),
+    ok = gen_server:reply(From, {error, {worker_init_failed, Reason}}),
+    St#{size => PoolSize - 1, worker_requests := WorkerRequests1}.
 
 %%
 
@@ -427,7 +419,7 @@ handle_process_down(client, ClientPid, _Reason, St = #{clients := Clients0}) ->
 handle_process_down(worker, Worker, Reason, St = #{worker_requests := WorkerRequests0}) ->
     case worker_request_exists(Worker, WorkerRequests0) of
         true ->
-            handle_worker_start_failed(Worker, Reason, St);
+            handle_worker_start_fail(Worker, Reason, St);
         false ->
             handle_worker_exit(Worker, St)
     end.
