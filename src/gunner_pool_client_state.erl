@@ -49,7 +49,8 @@ register_lease(Connection, ReturnTo, St = #{connection_leases := Leases}) ->
     St#{connection_leases => [new_lease(Connection, ReturnTo) | Leases]}.
 
 %% @doc Cancels last lease for this client
--spec cancel_lease(state()) -> {ok, connection(), connection_group_id(), state()} | {error, no_leases | connection_not_found}.
+-spec cancel_lease(state()) ->
+    {ok, connection(), connection_group_id(), state()} | {error, no_leases | connection_not_found}.
 cancel_lease(#{connection_leases := []}) ->
     {error, no_leases};
 cancel_lease(St0 = #{connection_leases := [{LastConnection, _} | _]}) ->
@@ -61,7 +62,8 @@ cancel_lease(St0 = #{connection_leases := [{LastConnection, _} | _]}) ->
     end.
 
 %% @doc Returns the leased connection
--spec return_lease(connection(), state()) -> {ok, connection_group_id(), state()} | {error, no_leases | connection_not_found}.
+-spec return_lease(connection(), state()) ->
+    {ok, connection_group_id(), state()} | {error, no_leases | connection_not_found}.
 return_lease(_Connection, #{connection_leases := []}) ->
     {error, no_leases};
 return_lease(Connection, St = #{connection_leases := Leases}) ->
