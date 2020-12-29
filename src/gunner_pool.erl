@@ -27,8 +27,8 @@
 -type pool() :: pid().
 -type pool_id() :: atom().
 -type pool_opts() :: #{
-    connection_limit => size(),
-    max_free_connections => size()
+    total_connection_limit => size(),
+    free_connection_limit => size()
 }.
 
 -type connection_group_id() :: term().
@@ -44,10 +44,11 @@
 %% Internal types
 
 -type state() :: #{
-    size := size(),
-    connection_limit := size(),
+    total_connections := size(),
+    total_connection_limit := size(),
+    free_connections := size(),
+    free_connection_limit := size(),
     connection_groups := connection_groups(),
-    max_free_connections := size(),
     clients := clients(),
     connection_requests := connection_requests()
 }.
@@ -86,8 +87,8 @@
 -define(DEFAULT_PROCESS_REGISTRY, global).
 
 -define(DEFAULT_CLIENT_OPTS, #{connect_timeout => 5000}).
--define(DEFAULT_MAX_FREE_CONNECTIONS, 5).
--define(DEFAULT_CONNECTION_LIMIT, 25).
+-define(DEFAULT_FREE_CONNECTION_LIMIT, 5).
+-define(DEFAULT_TOTAL_CONNECTION_LIMIT, 25).
 
 %%
 %% API functions
@@ -244,11 +245,11 @@ create_group_id(ConnectionArgs) ->
 
 -spec handle_acquire(connection_group_id(), pid(), state()) ->
     {ok, {connection, connection()}, state()} | {ok, no_connection} | {error, pool_unavailable}.
-handle_acquire(GroupID, ClientPid, St = #{connection_groups := ConnectionGroups0, clients := Clients0}) ->
-    case fetch_next_connection(GroupID, ConnectionGroups0) of
-        {ok, Connection, ConnectionGroups1} ->
+handle_acquire(GroupID, ClientPid, St = #{clients := Clients0}) ->
+    case fetch_next_connection(GroupID, St) of
+        {ok, Connection, St1} ->
             Clients1 = register_client_lease(ClientPid, Connection, GroupID, Clients0),
-            {ok, {connection, Connection}, St#{connection_groups => ConnectionGroups1, clients => Clients1}};
+            {ok, {connection, Connection}, St1#{clients => Clients1}};
         {error, no_available_connections} ->
             case assert_pool_available(St) of
                 ok -> {ok, no_connection};
@@ -256,14 +257,15 @@ handle_acquire(GroupID, ClientPid, St = #{connection_groups := ConnectionGroups0
             end
     end.
 
--spec fetch_next_connection(connection_group_id(), connection_groups()) ->
-    {ok, connection(), connection_groups()} | {error, no_available_connections}.
-fetch_next_connection(GroupID, ConnectionGroups) ->
-    Group0 = get_connection_group_by_id(GroupID, ConnectionGroups),
+-spec fetch_next_connection(connection_group_id(), state()) ->
+    {ok, connection(), state()} | {error, no_available_connections}.
+fetch_next_connection(GroupID, St = #{free_connections := FreeConnections, connection_groups := ConnectionGroups0}) ->
+    Group0 = get_connection_group_by_id(GroupID, ConnectionGroups0),
     case is_connection_group_empty(Group0) of
         false ->
             {Connection, Group1} = get_next_connection(Group0),
-            {ok, Connection, update_connection_group(GroupID, Group1, ConnectionGroups)};
+            ConnectionGroups1 = update_connection_group(GroupID, Group1, ConnectionGroups0),
+            {ok, Connection, St#{free_connections => FreeConnections - 1, connection_groups => ConnectionGroups1}};
         true ->
             {error, no_available_connections}
     end.
@@ -289,7 +291,7 @@ add_new_client_state(ClientPid, Clients) ->
     update_client_state(ClientPid, create_client_state(ClientPid), Clients).
 
 -spec assert_pool_available(state()) -> ok | error.
-assert_pool_available(#{connection_limit := Limit, size := PoolSize}) when PoolSize < Limit ->
+assert_pool_available(#{total_connection_limit := Limit, total_connections := PoolSize}) when PoolSize < Limit ->
     ok;
 assert_pool_available(_) ->
     error.
@@ -300,45 +302,56 @@ handle_connection_start(
     GroupID,
     ConnectionArgs,
     From,
-    St = #{size := PoolSize, connection_requests := ConnectionRequests0}
+    St = #{total_connections := PoolSize, connection_requests := ConnectionRequests0}
 ) ->
     case create_connection(ConnectionArgs) of
         {ok, ConnectionPid} ->
             _ = erlang:monitor(process, ConnectionPid),
             ConnectionRequests1 = add_connection_request(ConnectionPid, GroupID, From, ConnectionRequests0),
-            {ok, St#{size => PoolSize + 1, connection_requests => ConnectionRequests1}};
+            {ok, St#{total_connections => PoolSize + 1, connection_requests => ConnectionRequests1}};
         {error, Reason} ->
             {error, {connection_init_failed, Reason}}
     end.
 
 -spec handle_connection_start_success(connection(), state()) -> state().
-handle_connection_start_success(ConnectionPid, St = #{connection_requests := ConnectionRequests0, clients := Clients0}) ->
+handle_connection_start_success(
+    ConnectionPid,
+    St = #{connection_requests := ConnectionRequests0, clients := Clients0}
+) ->
     {GroupID, {ClientPid, _} = From} = get_connection_request_by_pid(ConnectionPid, ConnectionRequests0),
     ConnectionRequests1 = remove_connection_request(ConnectionPid, ConnectionRequests0),
     Clients1 = register_client_lease(ClientPid, ConnectionPid, GroupID, Clients0),
-    ok = gen_server:reply(From, {ok, ConnectionPid}),
-    St#{connection_requests := ConnectionRequests1, clients := Clients1}.
+    _ = gen_server:reply(From, {ok, ConnectionPid}),
+    St#{connection_requests => ConnectionRequests1, clients => Clients1}.
 
 -spec handle_connection_start_fail(connection(), Reason :: term(), state()) -> state().
 handle_connection_start_fail(
     ConnectionPid,
     Reason,
-    St = #{size := PoolSize, connection_requests := ConnectionRequests0}
+    St = #{total_connections := PoolSize, connection_requests := ConnectionRequests0}
 ) ->
     {_GroupID, From} = get_connection_request_by_pid(ConnectionPid, ConnectionRequests0),
     ConnectionRequests1 = remove_connection_request(ConnectionPid, ConnectionRequests0),
-    ok = gen_server:reply(From, {error, {connection_init_failed, Reason}}),
-    St#{size => PoolSize - 1, connection_requests := ConnectionRequests1}.
+    _ = gen_server:reply(From, {error, {connection_init_failed, Reason}}),
+    St#{total_connections => PoolSize - 1, connection_requests => ConnectionRequests1}.
 
 %%
 
 -spec handle_free(connection(), client_pid(), state()) ->
     {ok, state()} | {error, client_state_not_found | {lease_return_failed, _Reason}}.
-handle_free(Connection, ClientPid, St = #{connection_groups := ConnectionGroups0, clients := Clients0}) ->
+handle_free(
+    Connection,
+    ClientPid,
+    St = #{free_connections := FreeConnections, connection_groups := ConnectionGroups0, clients := Clients0}
+) ->
     case return_lease(Connection, ClientPid, Clients0) of
         {ok, GroupID, Clients1} ->
             ConnectionGroups1 = return_connection(Connection, GroupID, ConnectionGroups0),
-            St1 = maybe_shrink_pool(GroupID, St#{connection_groups => ConnectionGroups1, clients => Clients1}),
+            St1 = maybe_shrink_pool(GroupID, St#{
+                free_connections => FreeConnections + 1,
+                connection_groups => ConnectionGroups1,
+                clients => Clients1
+            }),
             {ok, St1};
         {error, _Reason} = Error ->
             Error
@@ -458,10 +471,11 @@ return_all_leases([{Connection, ConnectionGroupID} | Rest], St = #{connection_gr
 -spec new_state(pool_opts()) -> state().
 new_state(Opts) ->
     #{
-        size => 0,
-        connection_limit => maps:get(connection_limit, Opts, ?DEFAULT_CONNECTION_LIMIT),
+        total_connections => 0,
+        total_connection_limit => maps:get(total_connection_limit, Opts, ?DEFAULT_TOTAL_CONNECTION_LIMIT),
+        free_connections => 0,
+        free_connection_limit => maps:get(free_connection_limit, Opts, ?DEFAULT_FREE_CONNECTION_LIMIT),
         connection_groups => #{},
-        max_free_connections => maps:get(max_free_connections, Opts, ?DEFAULT_MAX_FREE_CONNECTIONS),
         clients => #{},
         connection_requests => #{}
     }.
@@ -540,10 +554,6 @@ get_next_connection(Group) ->
 add_connection_to_group(Connection, Group) ->
     gunner_pool_connection_group:add_connection(Connection, Group).
 
--spec get_connection_group_size(connection_group()) -> non_neg_integer().
-get_connection_group_size(Group) ->
-    gunner_pool_connection_group:size(Group).
-
 -spec delete_connection_from_group(connection(), connection_group()) -> connection_group().
 delete_connection_from_group(Connection, Group) ->
     gunner_pool_connection_group:delete_connection(Connection, Group).
@@ -581,7 +591,7 @@ exit_connection(ConnectionPid) ->
 %%
 
 -spec get_pool_status(state()) -> status_response().
-get_pool_status(#{size := Size}) ->
+get_pool_status(#{total_connections := Size}) ->
     #{current_size => Size}.
 
 -spec ensure_group_exists(connection_group_id(), state()) -> state().
@@ -595,23 +605,27 @@ ensure_group_exists(GroupID, St0 = #{connection_groups := Groups0}) ->
     end.
 
 -spec maybe_shrink_pool(connection_group_id(), state()) -> state().
-maybe_shrink_pool(GroupID, St0 = #{max_free_connections := Limit, size := PoolSize, connection_groups := Groups0}) ->
+maybe_shrink_pool(
+    GroupID,
+    St0 = #{
+        free_connections := FreeConnections,
+        free_connection_limit := Limit,
+        total_connections := PoolSize,
+        connection_groups := Groups0
+    }
+) ->
     Group0 = get_connection_group_by_id(GroupID, Groups0),
-    case group_needs_shrinking(Group0, Limit) of
+    case FreeConnections > Limit of
         true ->
             Group1 = do_shrink_group(Group0),
-            St0#{size => PoolSize - 1, connection_groups => update_connection_group(GroupID, Group1, Groups0)};
+            St0#{
+                free_connections => FreeConnections - 1,
+                total_connections => PoolSize - 1,
+                connection_groups => update_connection_group(GroupID, Group1, Groups0)
+            };
         false ->
             St0
     end.
-
--spec group_needs_shrinking(connection_group(), Limit :: size()) -> boolean().
-group_needs_shrinking(Group, Limit) ->
-    is_connection_group_full(Group, Limit).
-
--spec is_connection_group_full(connection_group(), Max :: non_neg_integer()) -> boolean().
-is_connection_group_full(Group, MaxFreeGroupConnections) ->
-    get_connection_group_size(Group) > MaxFreeGroupConnections.
 
 -spec do_shrink_group(connection_group()) -> connection_group().
 do_shrink_group(Group0) ->
