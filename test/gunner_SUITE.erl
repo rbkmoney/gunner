@@ -97,7 +97,7 @@ request_ok(_C) ->
 
 -spec request_nxdomain(config()) -> test_return().
 request_nxdomain(_C) ->
-    {error, {connection_init_failed, {shutdown, nxdomain}}} = get(?GUNNER_POOL, "localghost", 8080, <<"/">>).
+    {error, {connection_failed, {shutdown, nxdomain}}} = get(?GUNNER_POOL, "localghost", 8080, <<"/">>).
 
 -spec pool_resizing_ok_test(config()) -> test_return().
 pool_resizing_ok_test(_C) ->
@@ -115,7 +115,7 @@ pool_resizing_ok_test(_C) ->
 
 -spec pool_unavalilable_test(config()) -> test_return().
 pool_unavalilable_test(_C) ->
-    RequestsAmount = 26,
+    RequestsAmount = 50,
     Pool = ?GUNNER_POOL,
     Host = "localhost",
     Port = 8080,
@@ -211,5 +211,5 @@ repeat(Fun, I, Acc0) ->
     repeat(Fun, I - 1, Acc1).
 
 get_pool_size(PoolID) ->
-    {ok, #{current_size := Size}} = gunner:pool_status(PoolID),
+    {ok, #{total_count := Size}} = gunner:pool_status(PoolID),
     Size.

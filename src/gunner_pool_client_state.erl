@@ -7,9 +7,9 @@
 
 -export([new/1]).
 
--export([register_lease/3]).
--export([cancel_lease/1]).
--export([return_lease/2]).
+-export([register_lease/4]).
+-export([cancel_lease/2]).
+-export([free_lease/2]).
 
 -export([purge_leases/1]).
 
@@ -28,9 +28,10 @@
 
 -type connection() :: gunner:connection().
 -type connection_group_id() :: gunner_pool:connection_group_id().
+-type ticket() :: reference().
 
 -type connection_leases() :: [connection_lease()].
--type connection_lease() :: {connection(), ReturnTo :: connection_group_id()}.
+-type connection_lease() :: {connection(), ticket(), ReturnTo :: connection_group_id()}.
 
 %%
 %% API functions
@@ -44,34 +45,34 @@ new(ClientPid) ->
     }.
 
 %% @doc Registers a connection lease for this client
--spec register_lease(connection(), connection_group_id(), state()) -> state().
-register_lease(Connection, ReturnTo, St = #{connection_leases := Leases}) ->
-    St#{connection_leases => [new_lease(Connection, ReturnTo) | Leases]}.
+-spec register_lease(connection(), ticket(), connection_group_id(), state()) -> state().
+register_lease(Connection, Ticket, ReturnTo, St = #{connection_leases := Leases}) ->
+    St#{connection_leases => [new_lease(Connection, Ticket, ReturnTo) | Leases]}.
 
-%% @doc Cancels last lease for this client
--spec cancel_lease(state()) ->
+%% @doc Cancels lease using its ticket
+-spec cancel_lease(ticket(), state()) ->
     {ok, connection(), connection_group_id(), state()} | {error, no_leases | connection_not_found}.
-cancel_lease(#{connection_leases := []}) ->
+cancel_lease(_Ticket, #{connection_leases := []}) ->
     {error, no_leases};
-cancel_lease(St0 = #{connection_leases := [{LastConnection, _} | _]}) ->
-    case return_lease(LastConnection, St0) of
-        {ok, ConnectionGroupId, St1} ->
-            {ok, LastConnection, ConnectionGroupId, St1};
-        {error, _} = Error ->
-            Error
+cancel_lease(Ticket, St = #{connection_leases := Leases}) ->
+    case lists:keytake(Ticket, 2, Leases) of
+        {value, {Connection, _Ticket, ReturnTo}, NewLeases} ->
+            {ok, Connection, ReturnTo, St#{connection_leases => NewLeases}};
+        false ->
+            {error, connection_not_found}
     end.
 
 %% @doc Returns the leased connection
--spec return_lease(connection(), state()) ->
+-spec free_lease(connection(), state()) ->
     {ok, connection_group_id(), state()} | {error, no_leases | connection_not_found}.
-return_lease(_Connection, #{connection_leases := []}) ->
+free_lease(_Connection, #{connection_leases := []}) ->
     {error, no_leases};
-return_lease(Connection, St = #{connection_leases := Leases}) ->
-    case find_and_remove_lease(Connection, Leases) of
-        {ok, ConnectionGroupId, NewLeases} ->
-            {ok, ConnectionGroupId, St#{connection_leases => NewLeases}};
-        {error, _} = Error ->
-            Error
+free_lease(Connection, St = #{connection_leases := Leases}) ->
+    case lists:keytake(Connection, 1, Leases) of
+        {value, {_Connection, _Ticket, ReturnTo}, NewLeases} ->
+            {ok, ReturnTo, St#{connection_leases => NewLeases}};
+        false ->
+            {error, connection_not_found}
     end.
 
 %% @doc Purges all the leases
@@ -90,16 +91,6 @@ destroy(_) ->
 %% Internal functions
 %%
 
--spec new_lease(connection(), connection_group_id()) -> connection_lease().
-new_lease(Connection, ReturnTo) ->
-    {Connection, ReturnTo}.
-
--spec find_and_remove_lease(connection(), connection_leases()) ->
-    {ok, connection_group_id(), connection_leases()} | {error, connection_not_found}.
-find_and_remove_lease(Connection, Leases) ->
-    case lists:keytake(Connection, 1, Leases) of
-        {value, {_, ReturnTo}, NewLeases} ->
-            {ok, ReturnTo, NewLeases};
-        false ->
-            {error, connection_not_found}
-    end.
+-spec new_lease(connection(), ticket(), connection_group_id()) -> connection_lease().
+new_lease(Connection, Ticket, ReturnTo) ->
+    {Connection, Ticket, ReturnTo}.

@@ -77,11 +77,12 @@ acquire(PoolID, ConnectionArgs) ->
 -spec acquire(pool_id(), connection_args(), timeout()) ->
     {ok, connection()} | {error, pool_not_found | pool_unavailable | {connection_init_failed, _}} | no_return().
 acquire(PoolID, ConnectionArgs, Timeout) ->
+    Ticket = erlang:make_ref(),
     try
-        gunner_pool:acquire(PoolID, ConnectionArgs, Timeout)
+        gunner_pool:acquire(PoolID, ConnectionArgs, Ticket, Timeout)
     catch
         Error:Reason:Stacktrace ->
-            ok = gunner_pool:cancel_acquire(PoolID),
+            ok = gunner_pool:cancel_acquire(PoolID, Ticket),
             erlang:raise(Error, Reason, Stacktrace)
     end.
 
