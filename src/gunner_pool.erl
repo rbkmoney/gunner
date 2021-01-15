@@ -128,7 +128,7 @@ cancel_acquire(PoolID, Ticket) ->
     gen_server:cast(via_tuple(PoolID), {cancel_acquire, self(), Ticket}).
 
 -spec free(pool_id(), connection(), timeout()) ->
-    ok | {error, pool_not_found | {client, not_found} | {connection, {lease_return_failed, _Reason}}}.
+    ok | {error, pool_not_found | {lease_return_failed, no_leases | connection_not_found | client_state_not_found}}.
 free(PoolID, Connection, Timeout) ->
     call_pool(PoolID, {free, Connection}, Timeout).
 
@@ -170,7 +170,7 @@ init([PoolOpts]) ->
         {reply, {error, pool_unavailable | {connection_failed, Reason :: _}}, state()};
     ({free, connection()}, from(), state()) -> {reply, ok | {error, Reason}, state()} when
         Reason :: {lease_return_failed, no_leases | connection_not_found | client_state_not_found};
-    (status, from(), state()) -> {reply, status_response(), state()}.
+    (status, from(), state()) -> {reply, {ok, status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
 handle_call({acquire, ConnectionArgs, Ticket}, From, St0) ->
     GroupID = create_group_id(ConnectionArgs),
@@ -325,15 +325,15 @@ handle_connection_free(Connection, GroupID, St0 = #{free_connection_limit := Fre
         case is_pool_oversized(PoolSt1, FreeLimit) of
             true ->
                 {ok, PoolSt2} = gunner_connection_pool:remove(Connection, GroupID, PoolSt1),
-                {{ok, shrink}, PoolSt2};
+                {{ok, pool_shrinked}, PoolSt2};
             false ->
-                {{ok, no_change}, PoolSt1}
+                {ok, PoolSt1}
         end
     end),
     case Result of
-        {ok, shrink} ->
+        {ok, pool_shrinked} ->
             process_kill_connection(Connection, St1);
-        {ok, no_change} ->
+        ok ->
             {ok, St1}
     end.
 
