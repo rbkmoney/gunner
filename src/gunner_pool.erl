@@ -479,7 +479,8 @@ return_connection_to_client(Connection, {ClientPid, _} = From, GroupID, Ticket, 
     {error, {connection_failed, Reason :: _}}.
 process_create_connection(ConnectionArgs, St0 = #{pool := PoolSt}) ->
     TotalLimit = get_total_limit(St0),
-    PendingRequestCount = get_pending_request_count(St0), %% not sure if bug or feature
+    %% not sure if bug or feature
+    PendingRequestCount = get_pending_request_count(St0),
     case is_pool_available(PoolSt, TotalLimit - PendingRequestCount) of
         true ->
             case start_connection_process(ConnectionArgs) of
