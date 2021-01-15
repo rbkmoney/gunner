@@ -209,23 +209,24 @@ handle_call(_Call, _From, _St) ->
 
 -spec handle_cast({cancel_acquire, client_pid(), ticket()}, state()) -> {noreply, state()}.
 handle_cast({cancel_acquire, ClientPid, Ticket}, St0) ->
-    NewSt =
+    Result =
         case do_cancel_connection_request(Ticket, ClientPid, St0) of
             {ok, St1} ->
-                St1;
+                {ok, St1};
             {error, no_connection_request} ->
-                {_, St1} = with_client_state(ClientPid, St0, fun(ClientSt0) ->
-                    case gunner_pool_client_state:cancel_lease(Ticket, ClientSt0) of
-                        {ok, Connection, ConnectionGroupId, ClientSt1} ->
-                            {{ok, Connection, ConnectionGroupId}, ClientSt1};
-                        {error, _Reason} = Error ->
-                            %% Todo: maybe log this?
-                            {Error, ClientSt0}
-                    end
-                end),
-                St1
+                case do_cancel_lease(ClientPid, Ticket, St0) of
+                    {{ok, Connection, GroupID}, St1} ->
+                        handle_connection_free(Connection, GroupID, St1);
+                    {{error, Reason}, _} ->
+                        {error, {lease_cancel_failed, Reason}}
+                end
         end,
-    {noreply, NewSt};
+    case Result of
+        {ok, NewSt} ->
+            {noreply, NewSt};
+        {error, _Reason} ->
+            {noreply, St0} %@TODO Log this?
+    end;
 handle_cast(_Cast, _St) ->
     erlang:error(unexpected_cast).
 
@@ -434,6 +435,20 @@ do_find_connection_request(Ticket, ClientPid, [{ClientPid, Request = #{ticket :=
     {ok, ClientPid, Request};
 do_find_connection_request(Ticket, ClientPid, [_ | Rest]) ->
     do_find_connection_request(Ticket, ClientPid, Rest).
+
+%%
+
+-spec do_cancel_lease(connection(), ticket(), state()) -> {CancelLeaseResult, state()} when
+    CancelLeaseResult :: {ok, connection(), connection_group_id()} | {error, no_leases | connection_not_found | client_state_not_found}.
+do_cancel_lease(ClientPid, Ticket, St0) ->
+    with_client_state(ClientPid, St0, fun(ClientSt0) ->
+        case gunner_pool_client_state:cancel_lease(Ticket, ClientSt0) of
+            {ok, Connection, ConnectionGroupId, ClientSt1} ->
+                {{ok, Connection, ConnectionGroupId}, ClientSt1};
+            {error, _Reason} = Error ->
+                {Error, ClientSt0}
+        end
+    end).
 
 %%
 
