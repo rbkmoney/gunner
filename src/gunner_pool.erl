@@ -225,7 +225,8 @@ handle_cast({cancel_acquire, ClientPid, Ticket}, St0) ->
         {ok, NewSt} ->
             {noreply, NewSt};
         {error, _Reason} ->
-            {noreply, St0} %@TODO Log this?
+            %@TODO Log this?
+            {noreply, St0}
     end;
 handle_cast(_Cast, _St) ->
     erlang:error(unexpected_cast).
@@ -439,7 +440,8 @@ do_find_connection_request(Ticket, ClientPid, [_ | Rest]) ->
 %%
 
 -spec do_cancel_lease(connection(), ticket(), state()) -> {CancelLeaseResult, state()} when
-    CancelLeaseResult :: {ok, connection(), connection_group_id()} | {error, no_leases | connection_not_found | client_state_not_found}.
+    CancelLeaseResult ::
+        {ok, connection(), connection_group_id()} | {error, no_leases | connection_not_found | client_state_not_found}.
 do_cancel_lease(ClientPid, Ticket, St0) ->
     with_client_state(ClientPid, St0, fun(ClientSt0) ->
         case gunner_pool_client_state:cancel_lease(Ticket, ClientSt0) of
