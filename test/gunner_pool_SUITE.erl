@@ -21,26 +21,30 @@
 -export([pool_not_found/1]).
 
 -export([acquire_free_ok_test/1]).
--export([mulitple_acquired_connections_for_process/1]).
 -export([cant_free_multiple_times/1]).
 -export([auto_free_on_client_death_test/1]).
--export([connection_allocation_test/1]).
+-export([connection_uniqness_test/1]).
 -export([connection_reuse_test/1]).
+-export([strict_connection_ownership_test/1]).
+-export([pool_limits_test/1]).
+-export([failed_connection_test/1]).
+-export([connection_died_in_use/1]).
+-export([connection_died_in_pool/1]).
 
 -export([cancel_acquire_test/1]).
 
--export([strict_connection_ownership_test/1]).
-
 -define(POOL_NAME_PROP, pool_name).
 -define(POOL_NAME(C), proplists:get_value(?POOL_NAME_PROP, C)).
+
+-define(FREE_CONNECTION_LIMIT, 2).
+-define(TOTAL_CONNECTION_LIMIT, 25).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
     [
         {group, pool_management},
-        {group, multiple_pool_tests},
-        {group, multiple_clients_tests},
-        cancel_acquire_test
+        {group, multipool_tests},
+        {group, multiple_pool_group_tests}
     ].
 
 -spec groups() -> [{group_name(), list(), [test_case_name()]}].
@@ -51,30 +55,37 @@ groups() ->
             pool_already_exists,
             pool_not_found
         ]},
-        {multiple_pool_tests, [parallel, {repeat, 2}], [
+        {multipool_tests, [parallel], [
             {group, single_pool_tests},
             {group, single_pool_tests},
             {group, single_pool_tests}
         ]},
-        {single_pool_tests, [sequence, shuffle], [
-            acquire_free_ok_test,
-            connection_allocation_test,
-            connection_reuse_test,
-            mulitple_acquired_connections_for_process,
-            cant_free_multiple_times
+        {single_pool_tests, [sequence], [
+            {group, single_pool_group_tests},
+            {group, single_pool_group_tests},
+            {group, single_pool_group_tests}
         ]},
-        {multiple_clients_tests, [], [
+        {single_pool_group_tests, [shuffle], [
+            acquire_free_ok_test,
+            connection_uniqness_test,
+            connection_reuse_test,
+            cant_free_multiple_times,
             strict_connection_ownership_test,
-            auto_free_on_client_death_test
+            auto_free_on_client_death_test,
+            pool_limits_test,
+            failed_connection_test,
+            connection_died_in_use,
+            connection_died_in_pool
+        ]},
+        {multiple_pool_group_tests, [sequence], [
+            cancel_acquire_test
         ]}
     ].
 
 -spec init_per_suite(config()) -> config().
 init_per_suite(C) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
-    _ = start_mock_server(fun() ->
-        {200, #{}, <<"ok">>}
-    end),
+    _ = start_mock_server(),
     C ++ [{apps, [App || {ok, App} <- Apps]}].
 
 -spec end_per_suite(config()) -> _.
@@ -87,15 +98,20 @@ end_per_suite(C) ->
 %%
 
 -spec init_per_group(group_name(), config()) -> config().
-init_per_group(TestCaseName, C) when TestCaseName =:= single_pool_tests; TestCaseName =:= multiple_clients_tests ->
+init_per_group(TestGroupName, C) when
+    TestGroupName =:= single_pool_tests; TestGroupName =:= multiple_pool_group_tests
+->
     PoolName = {pool, erlang:unique_integer()},
-    ok = gunner:start_pool(PoolName, #{}),
+    ok = gunner:start_pool(PoolName, #{
+        free_connection_limit => ?FREE_CONNECTION_LIMIT,
+        total_connection_limit => ?TOTAL_CONNECTION_LIMIT
+    }),
     C ++ [{?POOL_NAME_PROP, PoolName}];
 init_per_group(_, C) ->
     C.
 
 -spec end_per_group(group_name(), config()) -> _.
-end_per_group(TestCaseName, C) when TestCaseName =:= single_pool_tests; TestCaseName =:= multiple_clients_tests ->
+end_per_group(TestGroupName, C) when TestGroupName =:= single_pool_tests; TestGroupName =:= multiple_pool_group_tests ->
     ok = gunner:stop_pool(?POOL_NAME(C));
 end_per_group(_, _C) ->
     ok.
@@ -143,17 +159,63 @@ acquire_free_ok_test(C) ->
     end),
     ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free]).
 
--spec connection_allocation_test(config()) -> test_return().
-connection_allocation_test(C) ->
+-spec failed_connection_test(config()) -> test_return().
+failed_connection_test(C) ->
+    Counters = init_counter_state(?POOL_NAME(C)),
+    ok = client_process(fun() ->
+        ?assertEqual(
+            {error, {connection_failed, {shutdown, nxdomain}}},
+            gunner_pool:acquire(?POOL_NAME(C), {"localghost", 8080}, make_ref(), 1000)
+        ),
+        ?assertEqual(
+            {error, {connection_failed, {shutdown, econnrefused}}},
+            gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8081}, make_ref(), 1000)
+        ),
+        ok
+    end),
+    ok = assert_counters(?POOL_NAME(C), Counters, []).
+
+-spec connection_died_in_use(config()) -> test_return().
+connection_died_in_use(C) ->
+    Counters = init_counter_state(?POOL_NAME(C)),
+    ok = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
+        _ = erlang:exit(Connection, kill),
+        _ = timer:sleep(100), %% hmmmm....
+        ?assertEqual(
+            {error, {lease_return_failed, connection_not_found}},
+            gunner_pool:free(?POOL_NAME(C), Connection, 1000)
+        )
+    end),
+    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, busy_down]).
+
+-spec connection_died_in_pool(config()) -> test_return().
+connection_died_in_pool(C) ->
+    Counters = init_counter_state(?POOL_NAME(C)),
+    {ok, Connection} = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000),
+        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free]),
+        {ok, Connection}
+    end),
+    _ = erlang:exit(Connection, kill),
+    _ = timer:sleep(100), %% hmmmm....
+    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free, free_down]).
+
+-spec connection_uniqness_test(config()) -> test_return().
+connection_uniqness_test(C) ->
     Ticket = make_ref(),
     Counters = init_counter_state(?POOL_NAME(C)),
     _ = client_process(fun() ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         {ok, Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         ?assertNotEqual(Connection1, Connection2),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire])
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}]),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection2, 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection1, 1000),
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, {free, 2}])
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free]).
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, {free, 2}]).
 
 -spec connection_reuse_test(config()) -> test_return().
 connection_reuse_test(C) ->
@@ -163,28 +225,14 @@ connection_reuse_test(C) ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         {ok, Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         ?assertNotEqual(Connection1, Connection2),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire]),
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}]),
         ok = gunner_pool:free(?POOL_NAME(C), Connection2, 1000),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free]),
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, free]),
         {ok, Connection3} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         ?assertEqual(Connection3, Connection2),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, acquire])
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, free, acquire])
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, acquire, free, free]).
-
--spec mulitple_acquired_connections_for_process(config()) -> test_return().
-mulitple_acquired_connections_for_process(C) ->
-    Ticket = make_ref(),
-    Counters = init_counter_state(?POOL_NAME(C)),
-    ok = client_process(fun() ->
-        {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
-        {ok, Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire]),
-        ok = gunner_pool:free(?POOL_NAME(C), Connection2, 1000),
-        ok = gunner_pool:free(?POOL_NAME(C), Connection1, 1000),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free])
-    end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free]).
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, free, acquire, {free, 2}]).
 
 -spec cant_free_multiple_times(config()) -> test_return().
 cant_free_multiple_times(C) ->
@@ -193,94 +241,142 @@ cant_free_multiple_times(C) ->
     ok = client_process(fun() ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         {ok, _Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire]),
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}]),
         ?assertEqual(ok, gunner_pool:free(?POOL_NAME(C), Connection1, 1000)),
         ?assertEqual(
             {error, {lease_return_failed, connection_not_found}},
             gunner_pool:free(?POOL_NAME(C), Connection1, 1000)
         ),
-        ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free])
+        ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, free])
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free]).
-
--spec cancel_acquire_test(config()) -> test_return().
-cancel_acquire_test(_C) ->
-    PoolID = {pool, cancel_acquire_test},
-    ok = gunner:start_pool(PoolID, #{}),
-    Ticket = make_ref(),
-    Counters = init_counter_state(PoolID),
-    _ = client_process(fun() ->
-        %% @TODO this is pretty dumb
-        ?assertExit({timeout, _}, gunner_pool:acquire(PoolID, {"google.com", 80}, Ticket, 1)),
-        ok = gunner_pool:cancel_acquire(PoolID, Ticket)
-    end),
-    ok = assert_counters(PoolID, Counters, []),
-    _ = timer:sleep(1000),
-    ok = assert_counters(PoolID, Counters, [acquire, free]),
-    ok = gunner:stop_pool(PoolID).
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, {free, 2}]).
 
 -spec strict_connection_ownership_test(config()) -> test_return().
 strict_connection_ownership_test(C) ->
-    _ = start_worker_tab(),
+    _ = init_async_clients(),
     Counters = init_counter_state(?POOL_NAME(C)),
-    {ok, Connection1} = client_process_persistent(client1, fun() ->
+    {ok, Connection1} = client_process_async(client1, fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         {return, {ok, Connection}}
     end),
-    {ok, Connection2} = client_process_persistent(client2, fun() ->
+    {ok, Connection2} = client_process_async(client2, fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         {return, {ok, Connection}}
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire]),
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}]),
     ?assertNotEqual(Connection1, Connection2),
-    ok = client_process_persistent(client1, fun() ->
+    ok = client_process_async(client1, fun() ->
         ?assertEqual(
             {error, {lease_return_failed, connection_not_found}},
             gunner_pool:free(?POOL_NAME(C), Connection2, 1000)
         ),
         {return, ok}
     end),
-    ok = client_process_persistent(client2, fun() ->
+    ok = client_process_async(client2, fun() ->
         ?assertEqual(
             {error, {lease_return_failed, connection_not_found}},
             gunner_pool:free(?POOL_NAME(C), Connection1, 1000)
         ),
         {return, ok}
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire]),
-    ok = client_process_persistent(client1, fun() ->
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}]),
+    ok = client_process_async(client1, fun() ->
         ?assertEqual(ok, gunner_pool:free(?POOL_NAME(C), Connection1, 1000)),
         {exit, ok}
     end),
-    ok = client_process_persistent(client2, fun() ->
+    ok = client_process_async(client2, fun() ->
         ?assertEqual(ok, gunner_pool:free(?POOL_NAME(C), Connection2, 1000)),
         {exit, ok}
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free]).
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, {free, 2}]).
 
 -spec auto_free_on_client_death_test(config()) -> test_return().
 auto_free_on_client_death_test(C) ->
-    _ = start_worker_tab(),
+    _ = init_async_clients(),
     Counters = init_counter_state(?POOL_NAME(C)),
-    ok = client_process_persistent(client1, fun() ->
+    ok = client_process_async(client1, fun() ->
         _ = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         {return, ok}
     end),
-    ok = client_process_persistent(client2, fun() ->
+    ok = client_process_async(client2, fun() ->
         _ = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         {return, ok}
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire]),
-    ok = client_process_persistent(client1, fun() ->
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}]),
+    ok = client_process_async(client1, fun() ->
         {exit, ok}
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free]),
-    ok = client_process_persistent(client2, fun() ->
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, free]),
+    ok = client_process_async(client2, fun() ->
         {exit, ok}
     end),
-    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free]).
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, 2}, {free, 2}]).
+
+-spec pool_limits_test(config()) -> test_return().
+pool_limits_test(C) ->
+    _ = init_async_clients(),
+    Counters = init_counter_state(?POOL_NAME(C)),
+    RemainingCapacity = ?TOTAL_CONNECTION_LIMIT,
+    {ok, Processes1} = spawn_connections(RemainingCapacity, ?POOL_NAME(C)),
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, RemainingCapacity}]),
+    {error, pool_unavailable} = spawn_connections(1, ?POOL_NAME(C)),
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, RemainingCapacity + 1}]),
+    ok = free_connections(Processes1, ?POOL_NAME(C)),
+    ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, RemainingCapacity}, {free, RemainingCapacity}]).
+
+spawn_connections(Amount, PoolID) ->
+    spawn_connections(Amount, PoolID, []).
+
+spawn_connections(0, _PoolID, Acc) ->
+    {ok, Acc};
+spawn_connections(Amount, PoolID, Acc) ->
+    ClientID = {limit_test_client, Amount},
+    Result = client_process_async(ClientID, fun() ->
+        Result0 = gunner_pool:acquire(PoolID, {"localhost", 8080}, make_ref(), 1000),
+        {return, Result0}
+    end),
+    case Result of
+        {ok, Connection} ->
+            spawn_connections(Amount - 1, PoolID, [{ClientID, Connection} | Acc]);
+        {error, _} = Error ->
+            Error
+    end.
+
+free_connections([], _PoolID) ->
+    ok;
+free_connections([{ClientID, Connection} | Rest], PoolID) ->
+    Result = client_process_async(ClientID, fun() ->
+        Result0 = gunner_pool:free(PoolID, Connection, 1000),
+        {exit, Result0}
+    end),
+    case Result of
+        ok ->
+            free_connections(Rest, PoolID);
+        {error, _} = Error ->
+            Error
+    end.
 
 %%
+
+-spec cancel_acquire_test(config()) -> test_return().
+cancel_acquire_test(C) ->
+    Ticket = make_ref(),
+    Counters = init_counter_state(?POOL_NAME(C)),
+    _ = client_process(fun() ->
+        %% @TODO this is pretty dumb
+        ?assertExit({timeout, _}, gunner_pool:acquire(?POOL_NAME(C), {"google.com", 80}, Ticket, 1)),
+        ok = gunner_pool:cancel_acquire(?POOL_NAME(C), Ticket)
+    end),
+    ok = assert_counters(?POOL_NAME(C), Counters, []),
+    _ = timer:sleep(1000),
+    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free]).
+
+%%
+
+start_mock_server() ->
+    start_mock_server(fun() ->
+        {200, #{}, <<"ok">>}
+    end).
 
 start_mock_server(HandlerFun) ->
     mock_http_server:start(8080, HandlerFun).
@@ -291,36 +387,59 @@ stop_mock_server() ->
 %%
 
 init_counter_state(PoolID) ->
-    InitialFree = get_pool_free_size(PoolID),
-    InitialTotal = get_pool_total_size(PoolID),
+    PoolStats = get_pool_stats(PoolID),
+    InitialFree = get_pool_free_size(PoolStats),
+    InitialTotal = get_pool_total_size(PoolStats),
     {InitialFree, InitialTotal}.
 
-count_operations({Free, Total}, []) ->
+count_operations({Free, Total}, _Limits, []) ->
     {Free, Total};
-count_operations({Free, Total}, [acquire | Rest]) when Free =:= 0 ->
-    count_operations({Free, Total + 1}, Rest);
-count_operations({Free, Total}, [acquire | Rest]) when Free > 0 ->
-    count_operations({Free - 1, Total}, Rest);
-count_operations({Free, Total}, [free | Rest]) ->
-    count_operations({Free + 1, Total}, Rest).
+count_operations({Free, Total}, {_MaxFree, MaxTotal} = Limits, [acquire | Rest]) when Free =:= 0, MaxTotal > Total ->
+    count_operations({Free, Total + 1}, Limits, Rest);
+count_operations({Free, Total}, {_MaxFree, MaxTotal} = Limits, [acquire | Rest]) when Free =:= 0, MaxTotal =< Total ->
+    count_operations({Free, Total}, Limits, Rest);
+count_operations({Free, Total}, {_MaxFree, _MaxTotal} = Limits, [acquire | Rest]) when Free > 0 ->
+    count_operations({Free - 1, Total}, Limits, Rest);
+count_operations({Free, Total}, {MaxFree, _MaxTotal} = Limits, [free | Rest]) when MaxFree > Free ->
+    count_operations({Free + 1, Total}, Limits, Rest);
+count_operations({Free, Total}, {MaxFree, _MaxTotal} = Limits, [free | Rest]) when MaxFree =< Free ->
+    count_operations({Free, Total - 1}, Limits, Rest);
+count_operations({Free, Total}, {_MaxFree, _MaxTotal} = Limits, [busy_down | Rest]) ->
+    count_operations({Free, Total - 1}, Limits, Rest);
+count_operations({Free, Total}, {_MaxFree, _MaxTotal} = Limits, [free_down | Rest]) ->
+    count_operations({Free - 1, Total - 1}, Limits, Rest).
+
+expand_operations(Operations) ->
+    expand_operations(Operations, []).
+
+expand_operations([], Acc) ->
+    lists:reverse(Acc);
+expand_operations([{Operation, Amount} | Rest], Acc) ->
+    expand_operations(Rest, lists:duplicate(Amount, Operation) ++ Acc);
+expand_operations([Operation | Rest], Acc) when is_atom(Operation) ->
+    expand_operations(Rest, [Operation | Acc]).
 
 assert_counters(PoolID, Counters, Operations) ->
-    NewCounters = count_operations(Counters, Operations),
-    case {get_pool_free_size(PoolID), get_pool_total_size(PoolID)} of
+    assert_counters(PoolID, Counters, Operations, {?FREE_CONNECTION_LIMIT, ?TOTAL_CONNECTION_LIMIT}).
+
+assert_counters(PoolID, Counters, Operations, Limits) ->
+    NewCounters = count_operations(Counters, Limits, expand_operations(Operations)),
+    PoolStats = get_pool_stats(PoolID),
+    case {get_pool_free_size(PoolStats), get_pool_total_size(PoolStats)} of
         NewCounters ->
             ok;
         InvalidCounters ->
-            {error, {NewCounters, InvalidCounters}}
+            {error, {{original, Counters}, {calculated, NewCounters}, {actual, InvalidCounters}}}
     end.
 
 %%
 
-client_process_persistent(Name, Fun) ->
-    client_process_persistent(Name, Fun, 1000).
+client_process_async(Name, Fun) ->
+    client_process_async(Name, Fun, 1000).
 
-client_process_persistent(Name, Fun, Timeout) ->
+client_process_async(Name, Fun, Timeout) ->
     Pid = find_or_create_process(Name),
-    Pid ! Fun,
+    Pid ! {run, Fun},
     receive
         {result, Result} ->
             Result;
@@ -334,7 +453,7 @@ client_process_persistent(Name, Fun, Timeout) ->
 
 -define(WORKER_TAB, test_worker_pids).
 
-start_worker_tab() ->
+init_async_clients() ->
     ets:new(?WORKER_TAB, [set, named_table]).
 
 find_or_create_process(Name) ->
@@ -349,14 +468,14 @@ find_or_create_process(Name) ->
 
 create_process(Timeout) ->
     Self = self(),
-    spawn_link(fun() -> persistent_process(Self, Timeout) end).
+    spawn_link(fun() -> async_client_process(Self, Timeout) end).
 
 delete_process(Name) ->
     ets:delete(?WORKER_TAB, Name).
 
-persistent_process(Parent, Timeout) ->
+async_client_process(Parent, Timeout) ->
     receive
-        Fun ->
+        {run, Fun} ->
             Result =
                 try
                     Fun()
@@ -367,12 +486,12 @@ persistent_process(Parent, Timeout) ->
             case Result of
                 {return, Return} ->
                     Parent ! {result, Return},
-                    persistent_process(Parent, Timeout);
+                    async_client_process(Parent, Timeout);
                 {exit, _} = Exit ->
                     Parent ! Exit;
                 {caught, _} = Caught ->
                     Parent ! Caught,
-                    persistent_process(Parent, Timeout)
+                    async_client_process(Parent, Timeout)
             end
     after Timeout -> ok
     end.
@@ -402,10 +521,12 @@ client_process(Fun, Timeout) ->
 
 %%
 
-get_pool_total_size(PoolID) ->
-    {ok, #{total_count := Size}} = gunner:pool_status(PoolID),
+get_pool_stats(PoolID) ->
+    {ok, PoolStats} = gunner:pool_status(PoolID),
+    PoolStats.
+
+get_pool_total_size(#{total_count := Size}) ->
     Size.
 
-get_pool_free_size(PoolID) ->
-    {ok, #{free_count := Size}} = gunner:pool_status(PoolID),
+get_pool_free_size(#{free_count := Size}) ->
     Size.

@@ -49,7 +49,8 @@
     pool := connection_pool(),
     clients := clients(),
     connection_requests := connection_requests(),
-    connection_monitors := connection_monitors()
+    connection_monitors := connection_monitors(),
+    client_assignments := client_assignments()
 }.
 
 -type connection_pool() :: gunner_connection_pool:state().
@@ -83,6 +84,7 @@
 -type monitor_ref() :: reference().
 
 -type connection_monitors() :: #{connection() => monitor_ref()}.
+-type client_assignments() :: #{connection() => client_pid()}.
 
 %%
 
@@ -128,7 +130,7 @@ cancel_acquire(PoolID, Ticket) ->
     gen_server:cast(via_tuple(PoolID), {cancel_acquire, self(), Ticket}).
 
 -spec free(pool_id(), connection(), timeout()) ->
-    ok | {error, pool_not_found | {lease_return_failed, no_leases | connection_not_found | client_state_not_found}}.
+    ok | {error, pool_not_found | {lease_return_failed, connection_not_found | client_state_not_found}}.
 free(PoolID, Connection, Timeout) ->
     call_pool(PoolID, {free, Connection}, Timeout).
 
@@ -169,7 +171,7 @@ init([PoolOpts]) ->
         {noreply, state()} |
         {reply, {error, pool_unavailable | {connection_failed, Reason :: _}}, state()};
     ({free, connection()}, from(), state()) -> {reply, ok | {error, Reason}, state()} when
-        Reason :: {lease_return_failed, no_leases | connection_not_found | client_state_not_found};
+        Reason :: {lease_return_failed, connection_not_found | client_state_not_found};
     (status, from(), state()) -> {reply, {ok, status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
 handle_call({acquire, ConnectionArgs, Ticket}, From, St0) ->
@@ -190,7 +192,7 @@ handle_call({acquire, ConnectionArgs, Ticket}, From, St0) ->
     end;
 handle_call({free, Connection}, {ClientPid, _}, St0) ->
     Result =
-        case do_free_lease(Connection, ClientPid, St0) of
+        case do_free_lease(ClientPid, Connection, St0) of
             {{ok, GroupID}, St1} ->
                 handle_connection_free(Connection, GroupID, St1);
             {{error, Reason}, _} ->
@@ -256,7 +258,8 @@ new_state(Opts) ->
         pool => gunner_connection_pool:new(),
         clients => #{},
         connection_requests => #{},
-        connection_monitors => #{}
+        connection_monitors => #{},
+        client_assignments => #{}
     }.
 
 -spec create_group_id(connection_args()) -> connection_group_id().
@@ -307,12 +310,20 @@ handle_connection_started(Connection, St0) ->
 %%
 
 -spec handle_connection_closed(connection(), state()) -> {ok, state()} | {error, Reason :: _}.
-handle_connection_closed(Connection, St0) ->
-    with_pool(St0, fun(PoolSt) ->
-        {ok, GroupID} = gunner_connection_pool:get_assignment(Connection, PoolSt),
-        {ok, PoolSt1} = gunner_connection_pool:free(Connection, GroupID, PoolSt),
-        gunner_connection_pool:remove(Connection, GroupID, PoolSt1)
-    end).
+handle_connection_closed(Connection, St0 = #{pool := PoolSt0}) ->
+    case gunner_connection_pool:is_busy(Connection, PoolSt0) of
+        true ->
+            {{ok, GroupID}, St1} = do_free_lease(Connection, St0),
+            with_pool(St1, fun(PoolSt) ->
+                {ok, PoolSt1} = gunner_connection_pool:free(Connection, GroupID, PoolSt),
+                gunner_connection_pool:remove(Connection, GroupID, PoolSt1)
+            end);
+        false ->
+            with_pool(St0, fun(PoolSt) ->
+                {ok, GroupID} = gunner_connection_pool:get_assignment(Connection, PoolSt),
+                gunner_connection_pool:remove(Connection, GroupID, PoolSt)
+            end)
+    end.
 
 %%
 
@@ -341,6 +352,7 @@ handle_connection_free(Connection, GroupID, St0 = #{free_connection_limit := Fre
 
 -spec handle_process_down(pid(), Reason :: any(), state()) -> {ok, state()}.
 handle_process_down(ProcessPid, Reason, St0) ->
+    %%@TODO All of this really needs to be refactored
     case is_client_process(ProcessPid, St0) of
         true ->
             handle_client_death(ProcessPid, St0);
@@ -398,21 +410,6 @@ handle_connection_start_failed(Connection, Reason, St0) ->
 
 %%
 
--spec do_free_lease(connection(), client_pid(), state()) -> {FreeLeaseResult, state()} when
-    FreeLeaseResult :: {ok, connection_group_id()} | {error, no_leases | connection_not_found | client_state_not_found}.
-do_free_lease(Connection, ClientPid, St0) ->
-    with_client_state(ClientPid, St0, fun(ClientSt0) ->
-        %% @TODO it is now possible to get rid of ReturnTo in client leases, consider
-        case gunner_pool_client_state:free_lease(Connection, ClientSt0) of
-            {ok, ConnectionGroupId, ClientSt1} ->
-                {{ok, ConnectionGroupId}, ClientSt1};
-            {error, _Reason} = Error ->
-                {Error, ClientSt0}
-        end
-    end).
-
-%%
-
 -spec do_cancel_connection_request(ticket(), client_pid(), state()) -> {ok, state()} | {error, no_connection_request}.
 do_cancel_connection_request(Ticket, ClientPid, St) ->
     case find_connection_request(Ticket, ClientPid, St) of
@@ -436,21 +433,6 @@ do_find_connection_request(Ticket, ClientPid, [{ClientPid, Request = #{ticket :=
     {ok, ClientPid, Request};
 do_find_connection_request(Ticket, ClientPid, [_ | Rest]) ->
     do_find_connection_request(Ticket, ClientPid, Rest).
-
-%%
-
--spec do_cancel_lease(connection(), ticket(), state()) -> {CancelLeaseResult, state()} when
-    CancelLeaseResult ::
-        {ok, connection(), connection_group_id()} | {error, no_leases | connection_not_found | client_state_not_found}.
-do_cancel_lease(ClientPid, Ticket, St0) ->
-    with_client_state(ClientPid, St0, fun(ClientSt0) ->
-        case gunner_pool_client_state:cancel_lease(Ticket, ClientSt0) of
-            {ok, Connection, ConnectionGroupId, ClientSt1} ->
-                {{ok, Connection, ConnectionGroupId}, ClientSt1};
-            {error, _Reason} = Error ->
-                {Error, ClientSt0}
-        end
-    end).
 
 %%
 
@@ -482,13 +464,75 @@ acquire_connection_from_pool(GroupID, St0) ->
 
 -spec return_connection_to_client(connection(), from(), connection_group_id(), ticket(), state()) -> state().
 return_connection_to_client(Connection, {ClientPid, _} = From, GroupID, Ticket, St0) ->
+    {ok, St1} = do_save_lease(Connection, ClientPid, Ticket, GroupID, St0),
+    _ = gen_server:reply(From, {ok, Connection}),
+    St1.
+
+%%
+
+-spec do_save_lease(connection(), client_pid(), ticket(), connection_group_id(), state()) -> {ok, state()}.
+do_save_lease(Connection, ClientPid, Ticket, GroupID, St0) ->
     St1 = ensure_client_state_exists(ClientPid, St0),
-    {ok, St2} = with_client_state(ClientPid, St1, fun(ClientSt0) ->
+    {Result, St2} = with_client_state(ClientPid, St1, fun(ClientSt0) ->
         ClientSt1 = gunner_pool_client_state:register_lease(Connection, Ticket, GroupID, ClientSt0),
         {ok, ClientSt1}
     end),
-    _ = gen_server:reply(From, {ok, Connection}),
-    St2.
+    {Result, save_client_assignment(Connection, ClientPid, St2)}.
+
+-spec do_free_lease(connection(), state()) -> {FreeLeaseResult, state()} when
+    FreeLeaseResult :: {ok, connection_group_id()} | {error, connection_not_found | client_state_not_found}.
+do_free_lease(Connection, St0) ->
+    ClientPid = get_client_assignment(Connection, St0),
+    do_free_lease(ClientPid, Connection, St0).
+
+-spec do_free_lease(client_pid(), connection(), state()) -> {FreeLeaseResult, state()} when
+    FreeLeaseResult :: {ok, connection_group_id()} | {error, connection_not_found | client_state_not_found}.
+do_free_lease(ClientPid, Connection, St0) ->
+    {Result, St1} = with_client_state(ClientPid, St0, fun(ClientSt0) ->
+        %% @TODO it is now possible to get rid of ReturnTo in client leases, consider
+        case gunner_pool_client_state:free_lease(Connection, ClientSt0) of
+            {ok, ConnectionGroupId, ClientSt1} ->
+                {{ok, ConnectionGroupId}, ClientSt1};
+            {error, _Reason} = Error ->
+                {Error, ClientSt0}
+        end
+    end),
+    {Result, remove_client_assignment(Connection, St1)}.
+
+-spec do_cancel_lease(client_pid(), ticket(), state()) -> {CancelLeaseResult, state()} when
+    CancelLeaseResult ::
+        {ok, connection(), connection_group_id()} | {error, connection_not_found | client_state_not_found}.
+do_cancel_lease(ClientPid, Ticket, St0) ->
+    {Result, St1} = with_client_state(ClientPid, St0, fun(ClientSt0) ->
+        case gunner_pool_client_state:cancel_lease(Ticket, ClientSt0) of
+            {ok, Connection, ConnectionGroupId, ClientSt1} ->
+                {{ok, Connection, ConnectionGroupId}, ClientSt1};
+            {error, _Reason} = Error ->
+                {Error, ClientSt0}
+        end
+    end),
+    case Result of
+        {ok, Connection, _} ->
+            {Result, remove_client_assignment(Connection, St1)};
+        {error, _} = Error ->
+            {Error, St1}
+    end.
+
+%%
+
+-spec get_client_assignment(connection(), state()) -> client_pid().
+get_client_assignment(Connection, #{client_assignments := Assignments}) ->
+    maps:get(Connection, Assignments).
+
+-spec save_client_assignment(connection(), client_pid(), state()) -> state().
+save_client_assignment(Connection, ClientPid, St = #{client_assignments := Assignments}) ->
+    St#{client_assignments => Assignments#{Connection => ClientPid}}.
+
+-spec remove_client_assignment(connection(), state()) -> state().
+remove_client_assignment(Connection, St = #{client_assignments := Assignments}) ->
+    St#{client_assignments => maps:without([Connection], Assignments)}.
+
+%%
 
 -spec process_create_connection(connection_args(), state()) ->
     {ok, connection(), state()} |
