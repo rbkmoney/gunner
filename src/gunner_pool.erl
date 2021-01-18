@@ -299,8 +299,8 @@ handle_connection_started(Connection, St0) ->
             {ok, St2};
         {ok, #{group_id := GroupID, requester := Requester, ticket := Ticket}} ->
             {ok, St1} = assign_connection_to_pool(Connection, GroupID, St0),
-            {{ok, Connection}, St2} = acquire_connection_from_pool(GroupID, St1),
-            St3 = return_connection_to_client(Connection, Requester, GroupID, Ticket, St2),
+            {{ok, Connection0}, St2} = acquire_connection_from_pool(GroupID, St1),
+            St3 = return_connection_to_client(Connection0, Requester, GroupID, Ticket, St2),
             St4 = remove_connection_request(Connection, St3),
             {ok, St4};
         not_found ->

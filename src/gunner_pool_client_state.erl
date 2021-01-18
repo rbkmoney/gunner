@@ -61,8 +61,7 @@ cancel_lease(Ticket, St = #{connection_leases := Leases}) ->
     end.
 
 %% @doc Returns the leased connection
--spec free_lease(connection(), state()) ->
-    {ok, connection_group_id(), state()} | {error, connection_not_found}.
+-spec free_lease(connection(), state()) -> {ok, connection_group_id(), state()} | {error, connection_not_found}.
 free_lease(Connection, St = #{connection_leases := Leases}) ->
     case lists:keytake(Connection, 1, Leases) of
         {value, {_Connection, _Ticket, ReturnTo}, NewLeases} ->

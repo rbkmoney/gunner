@@ -181,7 +181,8 @@ connection_died_in_use(C) ->
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         _ = erlang:exit(Connection, kill),
-        _ = timer:sleep(100), %% hmmmm....
+        %% hmmmm....
+        _ = timer:sleep(100),
         ?assertEqual(
             {error, {lease_return_failed, connection_not_found}},
             gunner_pool:free(?POOL_NAME(C), Connection, 1000)
@@ -199,7 +200,8 @@ connection_died_in_pool(C) ->
         {ok, Connection}
     end),
     _ = erlang:exit(Connection, kill),
-    _ = timer:sleep(100), %% hmmmm....
+    %% hmmmm....
+    _ = timer:sleep(100),
     ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free, free_down]).
 
 -spec connection_uniqness_test(config()) -> test_return().
