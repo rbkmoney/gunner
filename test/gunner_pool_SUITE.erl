@@ -23,7 +23,7 @@
 -export([acquire_free_ok_test/1]).
 -export([cant_free_multiple_times/1]).
 -export([auto_free_on_client_death_test/1]).
--export([connection_uniqness_test/1]).
+-export([connection_uniqueness_test/1]).
 -export([connection_reuse_test/1]).
 -export([strict_connection_ownership_test/1]).
 -export([pool_limits_test/1]).
@@ -61,13 +61,11 @@ groups() ->
             {group, single_pool_tests}
         ]},
         {single_pool_tests, [sequence], [
-            {group, single_pool_group_tests},
-            {group, single_pool_group_tests},
             {group, single_pool_group_tests}
         ]},
-        {single_pool_group_tests, [shuffle], [
+        {single_pool_group_tests, [shuffle, {repeat, 3}], [
             acquire_free_ok_test,
-            connection_uniqness_test,
+            connection_uniqueness_test,
             connection_reuse_test,
             cant_free_multiple_times,
             strict_connection_ownership_test,
@@ -180,9 +178,7 @@ connection_died_in_use(C) ->
     Counters = init_counter_state(?POOL_NAME(C)),
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
-        _ = erlang:exit(Connection, kill),
-        %% hmmmm....
-        _ = timer:sleep(100),
+        ok = gun:close(Connection),
         ?assertEqual(
             {error, {lease_return_failed, connection_not_found}},
             gunner_pool:free(?POOL_NAME(C), Connection, 1000)
@@ -199,13 +195,11 @@ connection_died_in_pool(C) ->
         ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free]),
         {ok, Connection}
     end),
-    _ = erlang:exit(Connection, kill),
-    %% hmmmm....
-    _ = timer:sleep(100),
+    ok = gun:close(Connection),
     ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free, free_down]).
 
--spec connection_uniqness_test(config()) -> test_return().
-connection_uniqness_test(C) ->
+-spec connection_uniqueness_test(config()) -> test_return().
+connection_uniqueness_test(C) ->
     Ticket = make_ref(),
     Counters = init_counter_state(?POOL_NAME(C)),
     _ = client_process(fun() ->
@@ -366,7 +360,7 @@ cancel_acquire_test(C) ->
     Counters = init_counter_state(?POOL_NAME(C)),
     _ = client_process(fun() ->
         %% @TODO this is pretty dumb
-        ?assertExit({timeout, _}, gunner_pool:acquire(?POOL_NAME(C), {"google.com", 80}, Ticket, 1)),
+        ?assertExit({timeout, _}, gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 0)),
         ok = gunner_pool:cancel_acquire(?POOL_NAME(C), Ticket)
     end),
     ok = assert_counters(?POOL_NAME(C), Counters, []),
