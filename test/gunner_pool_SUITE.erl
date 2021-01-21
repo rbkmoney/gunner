@@ -32,6 +32,8 @@
 -export([connection_died_in_pool/1]).
 
 -export([cancel_acquire_test/1]).
+-export([pool_group_isolation_test/1]).
+-export([pool_group_shared_free_limit_test/1]).
 
 -define(POOL_NAME_PROP, pool_name).
 -define(POOL_NAME(C), proplists:get_value(?POOL_NAME_PROP, C)).
@@ -76,7 +78,9 @@ groups() ->
             connection_died_in_pool
         ]},
         {multiple_pool_group_tests, [sequence], [
-            cancel_acquire_test
+            cancel_acquire_test,
+            pool_group_isolation_test,
+            pool_group_shared_free_limit_test
         ]}
     ].
 
@@ -148,7 +152,7 @@ pool_not_found(_C) ->
 -spec acquire_free_ok_test(config()) -> test_return().
 acquire_free_ok_test(C) ->
     Ticket = make_ref(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     %% Initial connection creation
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
@@ -159,7 +163,7 @@ acquire_free_ok_test(C) ->
 
 -spec failed_connection_test(config()) -> test_return().
 failed_connection_test(C) ->
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     ok = client_process(fun() ->
         ?assertEqual(
             {error, {connection_failed, {shutdown, nxdomain}}},
@@ -175,7 +179,7 @@ failed_connection_test(C) ->
 
 -spec connection_died_in_use(config()) -> test_return().
 connection_died_in_use(C) ->
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         ok = gun:close(Connection),
@@ -188,7 +192,7 @@ connection_died_in_use(C) ->
 
 -spec connection_died_in_pool(config()) -> test_return().
 connection_died_in_pool(C) ->
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     {ok, Connection} = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000),
@@ -201,7 +205,7 @@ connection_died_in_pool(C) ->
 -spec connection_uniqueness_test(config()) -> test_return().
 connection_uniqueness_test(C) ->
     Ticket = make_ref(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     _ = client_process(fun() ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         {ok, Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
@@ -216,7 +220,7 @@ connection_uniqueness_test(C) ->
 -spec connection_reuse_test(config()) -> test_return().
 connection_reuse_test(C) ->
     Ticket = make_ref(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     _ = client_process(fun() ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         {ok, Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
@@ -233,7 +237,7 @@ connection_reuse_test(C) ->
 -spec cant_free_multiple_times(config()) -> test_return().
 cant_free_multiple_times(C) ->
     Ticket = make_ref(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     ok = client_process(fun() ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
         {ok, _Connection2} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
@@ -250,7 +254,7 @@ cant_free_multiple_times(C) ->
 -spec strict_connection_ownership_test(config()) -> test_return().
 strict_connection_ownership_test(C) ->
     _ = init_async_clients(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     {ok, Connection1} = client_process_async(client1, fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         {return, {ok, Connection}}
@@ -289,7 +293,7 @@ strict_connection_ownership_test(C) ->
 -spec auto_free_on_client_death_test(config()) -> test_return().
 auto_free_on_client_death_test(C) ->
     _ = init_async_clients(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     ok = client_process_async(client1, fun() ->
         _ = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000),
         {return, ok}
@@ -311,7 +315,7 @@ auto_free_on_client_death_test(C) ->
 -spec pool_limits_test(config()) -> test_return().
 pool_limits_test(C) ->
     _ = init_async_clients(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     RemainingCapacity = ?TOTAL_CONNECTION_LIMIT,
     {ok, Processes1} = spawn_connections(RemainingCapacity, ?POOL_NAME(C)),
     ok = assert_counters(?POOL_NAME(C), Counters, [{acquire, RemainingCapacity}]),
@@ -357,7 +361,7 @@ free_connections([{ClientID, Connection} | Rest], PoolID) ->
 -spec cancel_acquire_test(config()) -> test_return().
 cancel_acquire_test(C) ->
     Ticket = make_ref(),
-    Counters = init_counter_state(?POOL_NAME(C)),
+    Counters = get_counters(?POOL_NAME(C)),
     _ = client_process(fun() ->
         %% @TODO this is pretty dumb
         ?assertExit({timeout, _}, gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 0)),
@@ -367,22 +371,61 @@ cancel_acquire_test(C) ->
     _ = timer:sleep(1000),
     ok = assert_counters(?POOL_NAME(C), Counters, [acquire, free]).
 
+-spec pool_group_isolation_test(config()) -> test_return().
+pool_group_isolation_test(C) ->
+    Ticket = make_ref(),
+    Counters = get_counters(?POOL_NAME(C)),
+    ok = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000)
+    end),
+    ok = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8088}, Ticket, 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000)
+    end),
+    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, free, free]).
+
+-spec pool_group_shared_free_limit_test(config()) -> test_return().
+pool_group_shared_free_limit_test(C) ->
+    Ticket = make_ref(),
+    Counters = get_counters(?POOL_NAME(C)),
+    %% This test relies on MAX_FREE_CONNECTIONS being 2
+    ok = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000)
+    end),
+    ok = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8088}, Ticket, 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000)
+    end),
+    ok = client_process(fun() ->
+        {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8089}, Ticket, 1000),
+        ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000)
+    end),
+    ok = assert_counters(?POOL_NAME(C), Counters, [acquire, acquire, acquire, free, free, free]),
+    {2, _} = get_counters(?POOL_NAME(C)).
+
 %%
 
 start_mock_server() ->
-    start_mock_server(fun() ->
+    start_mock_server(fun(_) ->
         {200, #{}, <<"ok">>}
     end).
 
 start_mock_server(HandlerFun) ->
-    mock_http_server:start(8080, HandlerFun).
+    _ = mock_http_server:start(default, 8080, HandlerFun),
+    _ = mock_http_server:start(alternative_1, 8088, HandlerFun),
+    _ = mock_http_server:start(alternative_2, 8089, HandlerFun),
+    ok.
 
 stop_mock_server() ->
-    mock_http_server:stop().
+    ok = mock_http_server:stop(default),
+    ok = mock_http_server:stop(alternative_1),
+    ok = mock_http_server:stop(alternative_2).
 
 %%
 
-init_counter_state(PoolID) ->
+get_counters(PoolID) ->
     PoolStats = get_pool_stats(PoolID),
     InitialFree = get_pool_free_size(PoolStats),
     InitialTotal = get_pool_total_size(PoolStats),

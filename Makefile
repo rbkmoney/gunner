@@ -11,11 +11,11 @@ SERVICE_NAME := gunner
 SERVICE_IMAGE_TAG ?= $(shell git rev-parse HEAD)
 
 BUILD_IMAGE_NAME := build-erlang
-BUILD_IMAGE_TAG := 19ff48ccbe09b00b79303fc6e5c63a3a9f8fd859
+BUILD_IMAGE_TAG := c60896ef07d41e7ae2e5f9b6ce845a60ad79acc7
 
 CALL_ANYWHERE := \
 	submodules \
-	all compile xref lint check_format format dialyze cover release clean distclean
+	all compile xref lint check_format format dialyze cover release clean distclean bench
 
 CALL_W_CONTAINER := $(CALL_ANYWHERE) test
 
@@ -67,3 +67,6 @@ cover:
 # CALL_W_CONTAINER
 test: submodules
 	$(REBAR) do eunit, ct
+
+bench:
+	$(REBAR) as test bench -m bench_gunner -n 1000

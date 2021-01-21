@@ -39,7 +39,7 @@ all() ->
 -spec groups() -> [{group_name(), list(), [test_case_name()]}].
 groups() ->
     [
-        {survival, [parallel, shuffle], create_group()}
+        {survival, [parallel, shuffle], create_group(1000)}
     ].
 
 -spec init_per_suite(config()) -> config().
@@ -84,20 +84,30 @@ init_per_testcase(_Name, C) ->
 end_per_testcase(_Name, _C) ->
     ok.
 
-create_group() ->
-    lists:duplicate(1000, normal_client) ++
-        lists:duplicate(100, misinformed_client) ++
-        lists:duplicate(100, confused_client) ++
-        lists:duplicate(100, impatient_client) ++
-        lists:duplicate(100, rude_client).
+create_group(TotalTests) ->
+    Spec = [
+        {normal_client, 0.6},
+        {misinformed_client, 0.1},
+        {confused_client, 0.1},
+        {impatient_client, 0.1},
+        {rude_client, 0.1}
+    ],
+    make_testcase_list(Spec, TotalTests, []).
+
+make_testcase_list([], _TotalTests, Acc) ->
+    lists:flatten(Acc);
+make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
+    Amount = round(TotalTests * Percent),
+    make_testcase_list(Rest, TotalTests, [lists:duplicate(Amount, CaseName) | Acc]).
 
 %%
 
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
-    case gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000) of
+    case gunner_pool:acquire(?POOL_NAME(C), valid_host(), make_ref(), 1000) of
         {ok, Connection} ->
-            {ok, <<"ok">>} = get(Connection, <<"/">>, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
+            Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
+            {ok, <<"ok/", Tag/binary>>} = get(Connection, <<"/", Tag/binary>>, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
             ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000);
         {error, pool_unavailable} ->
             ok
@@ -106,34 +116,35 @@ normal_client(C) ->
 -spec misinformed_client(config()) -> test_return().
 misinformed_client(C) ->
     case gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8081}, make_ref(), 1000) of
-        {error, {connection_failed, {shutdown, econnrefused}}} ->
+        {error, {connection_failed, _}} ->
             ok;
         {error, pool_unavailable} ->
-            ok;
-        Other ->
-            ct:fail({unexpected_result, Other})
+            ok
     end.
 
 -spec confused_client(config()) -> test_return().
 confused_client(C) ->
     case gunner_pool:acquire(?POOL_NAME(C), {"localghost", 8080}, make_ref(), 1000) of
-        {error, {connection_failed, {shutdown, nxdomain}}} ->
+        {error, {connection_failed, _}} ->
             ok;
         {error, pool_unavailable} ->
-            ok;
-        Other ->
-            ct:fail({unexpected_result, Other})
+            ok
     end.
 
 -spec impatient_client(config()) -> test_return().
 impatient_client(C) ->
     Ticket = make_ref(),
-    ?assertExit({timeout, _}, gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, Ticket, 0)),
-    ok = gunner_pool:cancel_acquire(?POOL_NAME(C), Ticket).
+    try
+        _ = gunner_pool:acquire(?POOL_NAME(C), valid_host(), Ticket, 1)
+    catch
+        _:_:_ -> ok
+    after
+        ok = gunner_pool:cancel_acquire(?POOL_NAME(C), Ticket)
+    end.
 
 -spec rude_client(config()) -> test_return().
 rude_client(C) ->
-    case gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, make_ref(), 1000) of
+    case gunner_pool:acquire(?POOL_NAME(C), valid_host(), make_ref(), 1000) of
         {ok, Connection} ->
             ok = gun:close(Connection),
             ok;
@@ -143,23 +154,32 @@ rude_client(C) ->
 
 %%
 
+valid_host() ->
+    Hosts = [
+        {"localhost", 8080},
+        {"localhost", 8086},
+        {"localhost", 8087}
+    ],
+    lists:nth(rand:uniform(length(Hosts)), Hosts).
+
 %%
 
 start_mock_server() ->
-    start_mock_server(fun() ->
+    start_mock_server(fun(#{path := Path}) ->
         _ = timer:sleep(rand:uniform(?COWBOY_HANDLER_MAX_SLEEP_DURATION)),
-        {200, #{}, <<"ok">>}
+        {200, #{}, <<"ok", Path/binary>>}
     end).
 
 start_mock_server(HandlerFun) ->
-    mock_http_server:start(8080, HandlerFun).
+    _ = mock_http_server:start(default, 8080, HandlerFun),
+    _ = mock_http_server:start(alternative_1, 8086, HandlerFun),
+    _ = mock_http_server:start(alternative_2, 8087, HandlerFun),
+    ok.
 
 stop_mock_server() ->
-    mock_http_server:stop().
-
-%get_pool_stats(PoolID) ->
-%    {ok, PoolStats} = gunner:pool_status(PoolID),
-%    PoolStats.
+    ok = mock_http_server:stop(default),
+    ok = mock_http_server:stop(alternative_1),
+    ok = mock_http_server:stop(alternative_2).
 
 %%
 

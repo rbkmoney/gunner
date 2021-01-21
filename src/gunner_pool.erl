@@ -21,6 +21,7 @@
 -export([handle_call/3]).
 -export([handle_cast/2]).
 -export([handle_info/2]).
+-export([terminate/2]).
 
 %% API Types
 
@@ -238,13 +239,16 @@ handle_info({gun_up, ConnPid, _Protocol}, St0) ->
     {ok, St1} = handle_connection_started(ConnPid, St0),
     {noreply, St1};
 handle_info({gun_down, _ConnPid, _Protocol, _Reason, _KilledStreams}, St0) ->
-    %% Handled via 'DOWN'
     {noreply, St0};
-handle_info({'DOWN', _Mref, process, ProcessPid, Reason}, St0) ->
-    {ok, St1} = handle_process_down(ProcessPid, Reason, St0),
+handle_info({'DOWN', Mref, process, ProcessPid, Reason}, St0) ->
+    {ok, St1} = handle_process_down(ProcessPid, Mref, Reason, St0),
     {noreply, St1};
 handle_info(_, _St0) ->
     erlang:error(unexpected_info).
+
+-spec terminate(any(), state()) -> ok.
+terminate(_, _St) ->
+    ok.
 
 %%
 %% Internal functions
@@ -350,14 +354,14 @@ handle_connection_free(Connection, GroupID, St0 = #{free_connection_limit := Fre
 
 %%
 
--spec handle_process_down(pid(), Reason :: any(), state()) -> {ok, state()}.
-handle_process_down(ProcessPid, Reason, St0) ->
+-spec handle_process_down(pid(), monitor_ref(), Reason :: any(), state()) -> {ok, state()}.
+handle_process_down(ProcessPid, MRef, Reason, St0) ->
     %%@TODO All of this really needs to be refactored
     case is_client_process(ProcessPid, St0) of
         true ->
             handle_client_death(ProcessPid, St0);
         false ->
-            handle_connection_death(ProcessPid, Reason, St0)
+            handle_connection_death(ProcessPid, MRef, Reason, St0)
     end.
 
 -spec is_client_process(pid(), state()) -> boolean().
@@ -366,8 +370,9 @@ is_client_process(ProcessPid, #{clients := Clients}) ->
 
 %%
 
--spec handle_connection_death(connection(), Reason :: any(), state()) -> {ok, state()}.
-handle_connection_death(Connection, Reason, St0) ->
+-spec handle_connection_death(connection(), monitor_ref(), Reason :: any(), state()) -> {ok, state()}.
+handle_connection_death(Connection, MRef, Reason, St0) ->
+    MRef = get_connection_monitor(Connection, St0),
     case connection_request_exists(Connection, St0) of
         true ->
             handle_connection_start_failed(Connection, Reason, St0);
@@ -626,7 +631,7 @@ start_connection_process({Host, Port}) ->
 -spec kill_connection_process(connection(), monitor_ref()) -> ok.
 kill_connection_process(ConnectionPid, MRef) ->
     true = demonitor(MRef, [flush]),
-    gun:shutdown(ConnectionPid).
+    gun:close(ConnectionPid).
 
 -spec get_gun_client_opts() -> gun_client_opts().
 get_gun_client_opts() ->
