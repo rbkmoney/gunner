@@ -14,6 +14,7 @@ gun(init) ->
     _ = start_mock_server(),
     [{apps, [App || {ok, App} <- Apps]}];
 gun({input, _State}) ->
+    _ = flush(),
     valid_host();
 gun({stop, State}) ->
     _ = stop_mock_server(),
@@ -25,15 +26,14 @@ gun({stop, State}) ->
 bench_gun({Host, Port}, _) ->
     {ok, Connection} = gun:open(Host, Port, #{retry => 0}),
     {ok, _} = gun:await_up(Connection, 1000),
-    Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    {ok, <<"ok/", Tag/binary>>} = get(Connection, <<"/", Tag/binary>>, 1000),
-    ok = gun:close(Connection).
+    _ = gun:get(Connection, <<"/">>),
+    _ = gun:shutdown(Connection).
 
 %%
 
 start_mock_server() ->
-    start_mock_server(fun(#{path := Path}) ->
-        {200, #{}, <<"ok", Path/binary>>}
+    start_mock_server(fun(_) ->
+        {200, #{}, <<"ok">>}
     end).
 
 start_mock_server(HandlerFun) ->
@@ -56,23 +56,9 @@ valid_host() ->
     ],
     lists:nth(rand:uniform(length(Hosts)), Hosts).
 
-get(Client, Path, Timeout) ->
-    Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    StreamRef = gun:get(Client, Path),
-    TimeoutLeft1 = Deadline - erlang:monotonic_time(millisecond),
-    case gun:await(Client, StreamRef, TimeoutLeft1) of
-        {response, nofin, 200, _Headers} ->
-            TimeoutLeft2 = Deadline - erlang:monotonic_time(millisecond),
-            case gun:await_body(Client, StreamRef, TimeoutLeft2) of
-                {ok, Response, _Trailers} ->
-                    {ok, Response};
-                {ok, Response} ->
-                    {ok, Response};
-                {error, Reason} ->
-                    {error, {unknown, Reason}}
-            end;
-        {response, fin, 404, _Headers} ->
-            {error, notfound};
-        {error, Reason} ->
-            {error, {unknown, Reason}}
+flush() ->
+    receive
+        _ -> flush()
+    after 0 ->
+        ok
     end.

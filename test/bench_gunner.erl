@@ -11,7 +11,9 @@
 gunner_pool(init) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
-    ok = gunner:start_pool(default, #{}),
+    ok = gunner:start_pool(default, #{
+        max_size => 1000
+    }),
     [{apps, [App || {ok, App} <- Apps]}];
 gunner_pool({input, _State}) ->
     valid_host();
@@ -24,14 +26,13 @@ gunner_pool({stop, State}) ->
 
 -spec bench_gunner_pool(_, _) -> _.
 bench_gunner_pool(Destination, _) ->
-    Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    {ok, <<"ok/", Tag/binary>>} = get(default, Destination, <<"/", Tag/binary>>, 1000).
+    {ok, _} = gunner:get(default, Destination, <<"/">>, 1000).
 
 %%
 
 start_mock_server() ->
-    start_mock_server(fun(#{path := Path}) ->
-        {200, #{}, <<"ok", Path/binary>>}
+    start_mock_server(fun(_) ->
+        {200, #{}, <<"ok">>}
     end).
 
 start_mock_server(HandlerFun) ->
@@ -53,28 +54,3 @@ valid_host() ->
         {"localhost", 8087}
     ],
     lists:nth(rand:uniform(length(Hosts)), Hosts).
-
-get(PoolID, ConnectionArgs, Path, Timeout) ->
-    Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    case gunner:get(PoolID, ConnectionArgs, Path, Timeout) of
-        {ok, PoolRef} ->
-            TimeoutLeft1 = Deadline - erlang:monotonic_time(millisecond),
-            case gunner:await(PoolRef, TimeoutLeft1) of
-                {response, nofin, 200, _Headers} ->
-                    TimeoutLeft2 = Deadline - erlang:monotonic_time(millisecond),
-                    case gunner:await_body(PoolRef, TimeoutLeft2) of
-                        {ok, Response, _Trailers} ->
-                            {ok, Response};
-                        {ok, Response} ->
-                            {ok, Response};
-                        {error, Reason} ->
-                            {error, {unknown, Reason}}
-                    end;
-                {response, fin, 404, _Headers} ->
-                    {error, notfound};
-                {error, Reason} ->
-                    {error, {unknown, Reason}}
-            end;
-        {error, _Reason} = Error ->
-            Error
-    end.

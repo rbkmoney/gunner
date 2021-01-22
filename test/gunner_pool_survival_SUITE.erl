@@ -109,12 +109,14 @@ make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case get(
-        ?POOL_NAME(C),
-        valid_host(),
-        <<"/", Tag/binary>>,
-        ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2
-    ) of
+    case
+        get(
+            ?POOL_NAME(C),
+            valid_host(),
+            <<"/", Tag/binary>>,
+            ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2
+        )
+    of
         {ok, <<"ok/", Tag/binary>>} ->
             ok;
         {error, pool_unavailable} ->
