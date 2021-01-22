@@ -19,16 +19,19 @@
 -export([normal_client/1]).
 -export([misinformed_client/1]).
 -export([confused_client/1]).
--export([impatient_client/1]).
--export([rude_client/1]).
 
 -define(POOL_NAME_PROP, pool_name).
 -define(POOL_NAME(C), proplists:get_value(?POOL_NAME_PROP, C)).
 
--define(POOL_FREE_CONNECTION_LIMIT, 5).
--define(POOL_TOTAL_CONNECTION_LIMIT, 50).
+-define(POOL_CLEANUP_INTERVAL, 1000).
+-define(POOL_MAX_CONNECTION_LOAD, 1).
+-define(POOL_MAX_CONNECTION_IDLE_AGE, 5).
+-define(POOL_MAX_SIZE, 25).
+-define(POOL_MIN_SIZE, 5).
 
 -define(COWBOY_HANDLER_MAX_SLEEP_DURATION, 2500).
+
+-define(GUNNER_REF(ConnectionPid, StreamRef), {gunner_ref, ConnectionPid, StreamRef}).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
@@ -61,8 +64,11 @@ end_per_suite(C) ->
 init_per_group(TestGroupName, C) when TestGroupName =:= survival ->
     PoolName = {pool, erlang:unique_integer()},
     ok = gunner:start_pool(PoolName, #{
-        free_connection_limit => ?POOL_FREE_CONNECTION_LIMIT,
-        total_connection_limit => ?POOL_TOTAL_CONNECTION_LIMIT
+        cleanup_interval => ?POOL_CLEANUP_INTERVAL,
+        max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
+        max_connection_idle_age => ?POOL_MAX_CONNECTION_IDLE_AGE,
+        max_size => ?POOL_MAX_SIZE,
+        min_size => ?POOL_MIN_SIZE
     }),
     C ++ [{?POOL_NAME_PROP, PoolName}];
 init_per_group(_, C) ->
@@ -86,11 +92,9 @@ end_per_testcase(_Name, _C) ->
 
 create_group(TotalTests) ->
     Spec = [
-        {normal_client, 0.6},
+        {normal_client, 0.8},
         {misinformed_client, 0.1},
-        {confused_client, 0.1},
-        {impatient_client, 0.1},
-        {rude_client, 0.1}
+        {confused_client, 0.1}
     ],
     make_testcase_list(Spec, TotalTests, []).
 
@@ -104,18 +108,22 @@ make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
 
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
-    case gunner_pool:acquire(?POOL_NAME(C), valid_host(), make_ref(), 1000) of
-        {ok, Connection} ->
-            Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-            {ok, <<"ok/", Tag/binary>>} = get(Connection, <<"/", Tag/binary>>, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
-            ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000);
+    Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
+    case get(
+        ?POOL_NAME(C),
+        valid_host(),
+        <<"/", Tag/binary>>,
+        ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2
+    ) of
+        {ok, <<"ok/", Tag/binary>>} ->
+            ok;
         {error, pool_unavailable} ->
             ok
     end.
 
 -spec misinformed_client(config()) -> test_return().
 misinformed_client(C) ->
-    case gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8081}, make_ref(), 1000) of
+    case gunner:get(?POOL_NAME(C), {"localhost", 8090}, <<"/">>, 1000) of
         {error, {connection_failed, _}} ->
             ok;
         {error, pool_unavailable} ->
@@ -124,29 +132,8 @@ misinformed_client(C) ->
 
 -spec confused_client(config()) -> test_return().
 confused_client(C) ->
-    case gunner_pool:acquire(?POOL_NAME(C), {"localghost", 8080}, make_ref(), 1000) of
+    case gunner:get(?POOL_NAME(C), {"localghost", 8080}, <<"/">>, 1000) of
         {error, {connection_failed, _}} ->
-            ok;
-        {error, pool_unavailable} ->
-            ok
-    end.
-
--spec impatient_client(config()) -> test_return().
-impatient_client(C) ->
-    Ticket = make_ref(),
-    try
-        _ = gunner_pool:acquire(?POOL_NAME(C), valid_host(), Ticket, 1)
-    catch
-        _:_:_ -> ok
-    after
-        ok = gunner_pool:cancel_acquire(?POOL_NAME(C), Ticket)
-    end.
-
--spec rude_client(config()) -> test_return().
-rude_client(C) ->
-    case gunner_pool:acquire(?POOL_NAME(C), valid_host(), make_ref(), 1000) of
-        {ok, Connection} ->
-            ok = gun:close(Connection),
             ok;
         {error, pool_unavailable} ->
             ok
@@ -183,22 +170,27 @@ stop_mock_server() ->
 
 %%
 
-get(Client, Path, Timeout) ->
-    StreamRef = gun:get(Client, Path),
+get(PoolID, ConnectionArgs, Path, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    case gun:await(Client, StreamRef, Timeout) of
-        {response, nofin, 200, _Headers} ->
-            TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
-            case gun:await_body(Client, StreamRef, TimeoutLeft) of
-                {ok, Response, _Trailers} ->
-                    {ok, Response};
-                {ok, Response} ->
-                    {ok, Response};
+    case gunner:get(PoolID, ConnectionArgs, Path, Timeout) of
+        {ok, PoolRef} ->
+            TimeoutLeft1 = Deadline - erlang:monotonic_time(millisecond),
+            case gunner:await(PoolRef, TimeoutLeft1) of
+                {response, nofin, 200, _Headers} ->
+                    TimeoutLeft2 = Deadline - erlang:monotonic_time(millisecond),
+                    case gunner:await_body(PoolRef, TimeoutLeft2) of
+                        {ok, Response, _Trailers} ->
+                            {ok, Response};
+                        {ok, Response} ->
+                            {ok, Response};
+                        {error, Reason} ->
+                            {error, {unknown, Reason}}
+                    end;
+                {response, fin, 404, _Headers} ->
+                    {error, notfound};
                 {error, Reason} ->
                     {error, {unknown, Reason}}
             end;
-        {response, fin, 404, _Headers} ->
-            {error, notfound};
-        {error, Reason} ->
-            {error, {unknown, Reason}}
+        {error, _Reason} = Error ->
+            Error
     end.

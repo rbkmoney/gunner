@@ -26,7 +26,6 @@
 -export([ws_send_frame_start/2]).
 -export([ws_send_frame_end/2]).
 -export([protocol_changed/2]).
--export([transport_changed/2]).
 -export([origin_changed/2]).
 -export([cancel/2]).
 -export([disconnect/2]).
@@ -41,152 +40,147 @@
 }.
 
 -type streams() :: #{
-    stream_ref() => {RequestStatus :: is_fin(), ResponseStatus :: is_fin()}
+    stream_ref() => {RequestEnded :: boolean(), ResponseEnded :: boolean()}
 }.
 
--type is_fin() :: fin | no_fin.
 -type stream_ref() :: gun:stream_ref().
 
 -spec init(gun_event:init_event(), state()) -> state().
 init(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec domain_lookup_start(gun_event:domain_lookup_event(), state()) -> state().
 domain_lookup_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec domain_lookup_end(gun_event:domain_lookup_event(), state()) -> state().
 domain_lookup_end(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec connect_start(gun_event:connect_event(), state()) -> state().
 connect_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec connect_end(gun_event:connect_event(), state()) -> state().
 connect_end(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec tls_handshake_start(gun_event:tls_handshake_event(), state()) -> state().
 tls_handshake_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec tls_handshake_end(gun_event:tls_handshake_event(), state()) -> state().
 tls_handshake_end(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec request_start(gun_event:request_start_event(), state()) -> state().
 request_start(Event, State = #{streams := Streams0, counters_ref := CountersRef, counters_idx := Idx}) ->
     StreamRef = maps:get(stream_ref, Event),
     ok = counters:add(CountersRef, Idx, 1),
-    Streams1 = Streams0#{StreamRef => {no_fin, no_fin}},
-    forward(Event, State#{streams => Streams1}, ?FUNCTION_NAME).
+    Streams1 = Streams0#{StreamRef => {false, false}},
+    forward_handler(Event, State#{streams => Streams1}, ?FUNCTION_NAME).
 
 -spec request_headers(gun_event:request_start_event(), state()) -> state().
 request_headers(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec request_end(gun_event:request_end_event(), state()) -> state().
 request_end(Event, State = #{streams := Streams0, counters_ref := CountersRef, counters_idx := Idx}) ->
     StreamRef = maps:get(stream_ref, Event),
     Streams1 =
         case maps:get(StreamRef, Streams0) of
-            {no_fin, fin} ->
+            {false, true} ->
                 ok = counters:sub(CountersRef, Idx, 1),
                 maps:remove(StreamRef, Streams0);
-            {no_fin, no_fin} ->
-                Streams0#{StreamRef => {fin, no_fin}}
+            {false, false} ->
+                Streams0#{StreamRef => {true, false}}
         end,
-    forward(Event, State#{streams => Streams1}, ?FUNCTION_NAME).
+    forward_handler(Event, State#{streams => Streams1}, ?FUNCTION_NAME).
 
 -spec push_promise_start(gun_event:push_promise_start_event(), state()) -> state().
 push_promise_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec push_promise_end(gun_event:push_promise_end_event(), state()) -> state().
 push_promise_end(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec response_start(gun_event:response_start_event(), state()) -> state().
 response_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec response_inform(gun_event:response_headers_event(), state()) -> state().
 response_inform(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec response_headers(gun_event:response_headers_event(), state()) -> state().
 response_headers(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec response_trailers(gun_event:response_trailers_event(), state()) -> state().
 response_trailers(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec response_end(gun_event:response_end_event(), state()) -> state().
 response_end(Event, State = #{streams := Streams0, counters_ref := CountersRef, counters_idx := Idx}) ->
     StreamRef = maps:get(stream_ref, Event),
     Streams1 =
         case maps:get(StreamRef, Streams0) of
-            {fin, no_fin} ->
+            {true, false} ->
                 ok = counters:sub(CountersRef, Idx, 1),
                 maps:remove(StreamRef, Streams0);
-            {no_fin, no_fin} ->
-                Streams0#{StreamRef => {no_fin, fin}}
+            {false, false} ->
+                Streams0#{StreamRef => {false, true}}
         end,
-    forward(Event, State#{streams => Streams1}, ?FUNCTION_NAME).
+    forward_handler(Event, State#{streams => Streams1}, ?FUNCTION_NAME).
 
 -spec ws_upgrade(gun_event:ws_upgrade_event(), state()) -> state().
 ws_upgrade(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec ws_recv_frame_start(gun_event:ws_recv_frame_start_event(), state()) -> state().
 ws_recv_frame_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec ws_recv_frame_header(gun_event:ws_recv_frame_header_event(), state()) -> state().
 ws_recv_frame_header(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec ws_recv_frame_end(gun_event:ws_recv_frame_end_event(), state()) -> state().
 ws_recv_frame_end(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec ws_send_frame_start(gun_event:ws_send_frame_event(), state()) -> state().
 ws_send_frame_start(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec ws_send_frame_end(gun_event:ws_send_frame_event(), state()) -> state().
 ws_send_frame_end(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec protocol_changed(gun_event:protocol_changed_event(), state()) -> state().
 protocol_changed(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
-
--spec transport_changed(gun_event:transport_changed_event(), state()) -> state().
-transport_changed(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec origin_changed(gun_event:origin_changed_event(), state()) -> state().
 origin_changed(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec cancel(gun_event:cancel_event(), state()) -> state().
 cancel(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec disconnect(gun_event:disconnect_event(), state()) -> state().
 disconnect(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
 -spec terminate(gun_event:terminate_event(), state()) -> state().
 terminate(Event, State) ->
-    forward(Event, State, ?FUNCTION_NAME).
+    forward_handler(Event, State, ?FUNCTION_NAME).
 
--spec forward(Event :: _, state(), Fun :: atom()) -> state().
-forward(Event, State = #{event_handler := {Mod, ModState0}}, Fun) ->
+-spec forward_handler(Event :: _, state(), Fun :: atom()) -> state().
+forward_handler(Event, State = #{event_handler := {Mod, ModState0}}, Fun) ->
     ModState = Mod:Fun(Event, ModState0),
     State#{event_handler => {Mod, ModState}};
-forward(_, State, _) ->
+forward_handler(_, State, _) ->
     State.

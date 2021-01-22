@@ -11,6 +11,9 @@
 -type idx() :: non_neg_integer().
 -type t() :: queue:queue().
 
+-export_type([idx/0]).
+-export_type([t/0]).
+
 %% Internal types
 
 -type size() :: non_neg_integer().
