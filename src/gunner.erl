@@ -1,3 +1,6 @@
+%% @TODO More method wrappers, gun:headers support
+%% @TODO Improve api to allow connection reusing for locking pools
+
 -module(gunner).
 
 %% API functions
@@ -29,6 +32,11 @@
 -export([await_body/1]).
 -export([await_body/2]).
 
+%% API Locking mode functions
+
+-export([free/2]).
+-export([free/3]).
+
 %% Application callbacks
 
 -behaviour(application).
@@ -40,7 +48,7 @@
 
 -type connection_args() :: {conn_host(), conn_port()}.
 
--opaque gunner_stream_ref() :: {gunner_ref, gunner_pool:connection_pid(), gun:stream_ref()}.
+-opaque gunner_stream_ref() :: {gunner_ref, connection_pid(), gun:stream_ref()}.
 
 -export_type([connection_args/0]).
 -export_type([gunner_stream_ref/0]).
@@ -59,9 +67,13 @@
 -type body() :: iodata().
 -type req_opts() :: gun:req_opts().
 
+-type connection_pid() :: gunner_pool:connection_pid().
+
 -type request_return() ::
-    {ok, gunner_stream_ref()} |
-    {error, pool_not_found | pool_unavailable | {failed_to_start_connection | connection_failed, _}}.
+    {ok, gunner_stream_ref()} | {error, acquire_error()}.
+
+-type acquire_error() ::
+    pool_not_found | pool_unavailable | {failed_to_start_connection, Why :: _} | {connection_failed, Why :: _}.
 
 %% Copypasted from gun.erl
 -type resp_headers() :: [{binary(), binary()}].
@@ -134,8 +146,6 @@ post(PoolID, ConnectionArgs, Path, Headers, Body, ReqOpts, Timeout) ->
 
 %%
 
-%% @TODO More method wrappers, gun:headers support
-
 %%
 
 -spec request(connection_args(), method(), path(), req_headers(), body(), req_opts()) -> request_return().
@@ -156,6 +166,18 @@ request(PoolID, ConnectionArgs, Method, Path, Headers, Body, ReqOpts, Timeout) -
         {error, _Reason} = Error ->
             Error
     end.
+
+%%
+
+-spec free(pool_id(), gunner_stream_ref()) ->
+    ok | {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+free(PoolID, GStreamRef) ->
+    free(PoolID, GStreamRef, ?DEFAULT_TIMEOUT).
+
+-spec free(pool_id(), gunner_stream_ref(), timeout()) ->
+    ok | {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+free(PoolID, {gunner_ref, ConnectionPid, _}, Timeout) ->
+    gunner_pool:free(PoolID, ConnectionPid, Timeout).
 
 %%
 

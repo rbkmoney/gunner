@@ -1,4 +1,4 @@
--module(gunner_pool_SUITE).
+-module(gunner_pool_loose_SUITE).
 
 -include_lib("stdlib/include/assert.hrl").
 
@@ -188,11 +188,11 @@ pool_resizing_test(C) ->
         end,
         lists:seq(0, ?POOL_MAX_SIZE * 2)
     ),
-    ?assertMatch({ok, #{current_size := ?POOL_MAX_SIZE}}, gunner:pool_status(?POOL_NAME(C))),
+    ?assertMatch({ok, #{total_connections := ?POOL_MAX_SIZE}}, gunner:pool_status(?POOL_NAME(C))),
     _ = timer:sleep(
         (?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2) + (?POOL_CLEANUP_INTERVAL * (?POOL_MAX_CONNECTION_IDLE_AGE))
     ),
-    ?assertMatch({ok, #{current_size := ?POOL_MIN_SIZE}}, gunner:pool_status(?POOL_NAME(C))).
+    ?assertMatch({ok, #{total_connections := ?POOL_MIN_SIZE}}, gunner:pool_status(?POOL_NAME(C))).
 
 %%
 

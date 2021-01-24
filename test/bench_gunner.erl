@@ -1,32 +1,59 @@
 -module(bench_gunner).
 
 -export([
-    gunner_pool/1,
-    bench_gunner_pool/2
+    gunner_pool_loose/1,
+    bench_gunner_pool_loose/2,
+    gunner_pool_locking/1,
+    bench_gunner_pool_locking/2
 ]).
 
 %%
 
--spec gunner_pool(_) -> _.
-gunner_pool(init) ->
+-spec gunner_pool_loose(_) -> _.
+gunner_pool_loose(init) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
     ok = gunner:start_pool(default, #{
         max_size => 1000
     }),
     [{apps, [App || {ok, App} <- Apps]}];
-gunner_pool({input, _State}) ->
+gunner_pool_loose({input, _State}) ->
     valid_host();
-gunner_pool({stop, State}) ->
+gunner_pool_loose({stop, State}) ->
     ok = gunner:stop_pool(default),
     _ = stop_mock_server(),
     Apps = proplists:get_value(apps, State),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
 
--spec bench_gunner_pool(_, _) -> _.
-bench_gunner_pool(Destination, _) ->
+-spec bench_gunner_pool_loose(_, _) -> _.
+bench_gunner_pool_loose(Destination, _) ->
     {ok, _} = gunner:get(default, Destination, <<"/">>, 1000).
+
+%%
+
+-spec gunner_pool_locking(_) -> _.
+gunner_pool_locking(init) ->
+    Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
+    _ = start_mock_server(),
+    ok = gunner:start_pool(default, #{
+        mode => locking,
+        max_size => 1000
+    }),
+    [{apps, [App || {ok, App} <- Apps]}];
+gunner_pool_locking({input, _State}) ->
+    valid_host();
+gunner_pool_locking({stop, State}) ->
+    ok = gunner:stop_pool(default),
+    _ = stop_mock_server(),
+    Apps = proplists:get_value(apps, State),
+    _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
+    ok.
+
+-spec bench_gunner_pool_locking(_, _) -> _.
+bench_gunner_pool_locking(Destination, _) ->
+    {ok, StreamRef} = gunner:get(default, Destination, <<"/">>, 1000),
+    _ = gunner:free(default, StreamRef, 1000).
 
 %%
 

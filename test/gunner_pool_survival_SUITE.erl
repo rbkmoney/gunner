@@ -36,13 +36,15 @@
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
     [
-        {group, survival}
+        {group, survival},
+        {group, survival_locking}
     ].
 
 -spec groups() -> [{group_name(), list(), [test_case_name()]}].
 groups() ->
     [
-        {survival, [parallel, shuffle], create_group(1000)}
+        {survival, [parallel, shuffle], create_group(500)},
+        {survival_locking, [parallel, shuffle], create_group(500)}
     ].
 
 -spec init_per_suite(config()) -> config().
@@ -61,9 +63,20 @@ end_per_suite(C) ->
 %%
 
 -spec init_per_group(group_name(), config()) -> config().
-init_per_group(TestGroupName, C) when TestGroupName =:= survival ->
+init_per_group(survival, C) ->
     PoolName = {pool, erlang:unique_integer()},
     ok = gunner:start_pool(PoolName, #{
+        cleanup_interval => ?POOL_CLEANUP_INTERVAL,
+        max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
+        max_connection_idle_age => ?POOL_MAX_CONNECTION_IDLE_AGE,
+        max_size => ?POOL_MAX_SIZE,
+        min_size => ?POOL_MIN_SIZE
+    }),
+    C ++ [{?POOL_NAME_PROP, PoolName}];
+init_per_group(survival_locking, C) ->
+    PoolName = {pool, erlang:unique_integer()},
+    ok = gunner:start_pool(PoolName, #{
+        mode => locking,
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
         max_connection_idle_age => ?POOL_MAX_CONNECTION_IDLE_AGE,
@@ -75,7 +88,7 @@ init_per_group(_, C) ->
     C.
 
 -spec end_per_group(group_name(), config()) -> _.
-end_per_group(TestGroupName, C) when TestGroupName =:= survival ->
+end_per_group(TestGroupName, C) when TestGroupName =:= survival; TestGroupName =:= survival_locking ->
     ok = gunner:stop_pool(?POOL_NAME(C));
 end_per_group(_, _C) ->
     ok.

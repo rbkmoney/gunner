@@ -59,6 +59,5 @@ valid_host() ->
 flush() ->
     receive
         _ -> flush()
-    after 0 ->
-        ok
+    after 0 -> ok
     end.
