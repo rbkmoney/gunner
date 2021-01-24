@@ -1,72 +1,59 @@
 -module(bench_gunner).
 
 -export([
-    gunner_pool_acquire/1,
-    bench_gunner_pool_acquire/2,
-    gunner_pool_free/1,
-    bench_gunner_pool_free/2
+    gunner_pool_loose/1,
+    bench_gunner_pool_loose/2,
+    gunner_pool_locking/1,
+    bench_gunner_pool_locking/2
 ]).
 
 %%
 
--spec gunner_pool_acquire(_) -> _.
-gunner_pool_acquire(init) ->
+-spec gunner_pool_loose(_) -> _.
+gunner_pool_loose(init) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
     ok = gunner:start_pool(default, #{
-        free_connection_limit => 5,
-        total_connection_limit => 100
+        max_size => 1000
     }),
     [{apps, [App || {ok, App} <- Apps]}];
-gunner_pool_acquire({input, _State}) ->
+gunner_pool_loose({input, _State}) ->
     valid_host();
-gunner_pool_acquire({stop, State}) ->
+gunner_pool_loose({stop, State}) ->
     ok = gunner:stop_pool(default),
     _ = stop_mock_server(),
     Apps = proplists:get_value(apps, State),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
 
--spec bench_gunner_pool_acquire(_, _) -> _.
-bench_gunner_pool_acquire(Destination, _) ->
-    case gunner_pool:acquire(default, Destination, make_ref(), 1000) of
-        {ok, _Connection} ->
-            ok;
-        {error, pool_unavailable} ->
-            %% 100 connection pool fills up even at 10s run durarion. I guess its fine?
-            ok
-    end.
+-spec bench_gunner_pool_loose(_, _) -> _.
+bench_gunner_pool_loose(Destination, _) ->
+    {ok, _} = gunner:get(default, Destination, <<"/">>, 1000).
 
 %%
 
--spec gunner_pool_free(_) -> _.
-gunner_pool_free(init) ->
+-spec gunner_pool_locking(_) -> _.
+gunner_pool_locking(init) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
     ok = gunner:start_pool(default, #{
-        free_connection_limit => 5,
-        total_connection_limit => 100
+        mode => locking,
+        max_size => 1000
     }),
     [{apps, [App || {ok, App} <- Apps]}];
-gunner_pool_free({input, _State}) ->
-    {ok, Connection} = gunner_pool:acquire(default, valid_host(), make_ref(), 1000),
-    Connection;
-gunner_pool_free({stop, State}) ->
+gunner_pool_locking({input, _State}) ->
+    valid_host();
+gunner_pool_locking({stop, State}) ->
     ok = gunner:stop_pool(default),
     _ = stop_mock_server(),
     Apps = proplists:get_value(apps, State),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
 
--spec bench_gunner_pool_free(_, _) -> _.
-bench_gunner_pool_free(Connection, _) ->
-    case gunner_pool:free(default, Connection, 1000) of
-        ok ->
-            ok;
-        {error, {lease_return_failed, connection_not_found}} ->
-            %% Connection might have been killed because of lack of requests
-            ok
-    end.
+-spec bench_gunner_pool_locking(_, _) -> _.
+bench_gunner_pool_locking(Destination, _) ->
+    {ok, StreamRef} = gunner:get(default, Destination, <<"/">>, 1000),
+    _ = gunner:free(default, StreamRef, 1000).
 
 %%
 
@@ -76,7 +63,7 @@ start_mock_server() ->
     end).
 
 start_mock_server(HandlerFun) ->
-    Conf = #{request_timeout => 5000},
+    Conf = #{request_timeout => infinity},
     _ = mock_http_server:start(default, 8080, HandlerFun, Conf),
     _ = mock_http_server:start(alternative_1, 8086, HandlerFun, Conf),
     _ = mock_http_server:start(alternative_2, 8087, HandlerFun, Conf),

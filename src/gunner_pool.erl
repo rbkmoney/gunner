@@ -6,12 +6,10 @@
 -export([stop_pool/1]).
 -export([start_link/2]).
 
--export([acquire/4]).
--export([cancel_acquire/2]).
-
--export([free/3]).
-
 -export([pool_status/2]).
+
+-export([acquire/3]).
+-export([free/3]).
 
 %% Gen Server callbacks
 
@@ -25,73 +23,104 @@
 
 %% API Types
 
+-type connection_pid() :: pid().
+
 -type pool() :: pid().
 -type pool_id() :: atom().
+-type pool_mode() :: loose | locking.
 -type pool_opts() :: #{
-    total_connection_limit => size(),
-    free_connection_limit => size()
+    mode => pool_mode(),
+    cleanup_interval => timeout(),
+    max_connection_load => size(),
+    max_connection_idle_age => size(),
+    max_size => size(),
+    min_size => size()
 }.
 
--type connection_group_id() :: term().
+-type group_id() :: term().
 
--type status_response() :: #{total_count := size(), free_count := size()}.
+-type pool_status_response() :: #{total_connections := size(), available_connections := size()}.
+
+-export_type([connection_pid/0]).
 
 -export_type([pool/0]).
 -export_type([pool_id/0]).
+-export_type([pool_mode/0]).
 -export_type([pool_opts/0]).
--export_type([connection_group_id/0]).
--export_type([status_response/0]).
+-export_type([group_id/0]).
+-export_type([pool_status_response/0]).
 
 %% Internal types
 
--type state() :: #{
-    total_connection_limit := size(),
-    free_connection_limit := size(),
-    pool := connection_pool(),
-    clients := clients(),
-    connection_requests := connection_requests(),
-    connection_monitors := connection_monitors(),
-    client_assignments := client_assignments()
-}.
+-record(state, {
+    mode = loose :: pool_mode(),
+    connections = #{} :: connections(),
+    clients = #{} :: clients(),
+    counters_ref :: counters:counters_ref(),
+    idx_authority :: gunner_idx_authority:t(),
+    max_size :: size(),
+    min_size :: size(),
+    current_size :: size(),
+    max_connection_load :: size(),
+    max_connection_idle_age :: size(),
+    cleanup_interval :: timeout()
+}).
 
--type connection_pool() :: gunner_connection_pool:state().
+-type state() :: #state{}.
 
--type clients() :: #{
-    client_pid() => client_state()
-}.
+-type connections() :: #{connection_pid() => connection_state()}.
 
--type client_pid() :: pid().
--type client_state() :: gunner_pool_client_state:state().
+-record(connection_state, {
+    status = down :: connection_status(),
+    group_id :: group_id(),
+    idx :: connection_idx(),
+    pid :: connection_pid(),
+    mref :: mref(),
+    idle_count = 0 :: integer()
+}).
 
--type connection_requests() :: #{
-    connection() => connection_request()
-}.
+-type connection_state() :: #connection_state{}.
 
--type connection_request() :: #{
-    requester := from() | undefined,
-    group_id := connection_group_id(),
-    ticket := ticket()
-}.
+-type connection_status() :: down | {starting, requester()} | {up, unlocked | {locked, Owner :: pid()}} | inactive.
+-type connection_idx() :: gunner_idx_authority:idx().
 
--type size() :: non_neg_integer().
-
--type connection() :: gunner:connection().
 -type connection_args() :: gunner:connection_args().
 
--type gun_client_opts() :: gun:opts().
+-type client_pid() :: pid().
+-type clients() :: #{client_pid() => client_state()}.
+
+-record(client_state, {
+    connections = [] :: [connection_pid()],
+    mref :: mref()
+}).
+
+-type client_state() :: #client_state{}.
+
+-type size() :: non_neg_integer().
+-type requester() :: from().
+-type mref() :: reference().
 
 -type from() :: {pid(), Tag :: _}.
--type ticket() :: reference().
--type monitor_ref() :: reference().
-
--type connection_monitors() :: #{connection() => monitor_ref()}.
--type client_assignments() :: #{connection() => client_pid()}.
 
 %%
 
 -define(DEFAULT_CLIENT_OPTS, #{connect_timeout => 5000}).
--define(DEFAULT_FREE_CONNECTION_LIMIT, 5).
--define(DEFAULT_TOTAL_CONNECTION_LIMIT, 25).
+
+-define(DEFAULT_MODE, loose).
+
+-define(DEFAULT_MAX_CONNECTION_LOAD, 1).
+-define(DEFAULT_MAX_CONNECTION_IDLE_AGE, 5).
+
+-define(DEFAULT_MIN_SIZE, 5).
+-define(DEFAULT_MAX_SIZE, 25).
+
+-define(DEFAULT_CLEANUP_INTERVAL, 1000).
+
+-define(GUN_UP(ConnectionPid), {gun_up, ConnectionPid, _Protocol}).
+-define(GUN_DOWN(ConnectionPid, Reason), {gun_down, ConnectionPid, _Protocol, Reason, _KilledStreams}).
+-define(DOWN(Mref, ConnectionPid, Reason), {'DOWN', Mref, process, ConnectionPid, Reason}).
+
+-define(GUNNER_CLEANUP(), {gunner_cleanup}).
 
 %%
 %% API functions
@@ -121,23 +150,21 @@ start_link(PoolID, PoolOpts) ->
 
 %%
 
--spec acquire(pool_id(), connection_args(), ticket(), timeout()) ->
-    {ok, connection()} | {error, pool_not_found | pool_unavailable | {connection_failed, _}}.
-acquire(PoolID, ConnectionArgs, Ticket, Timeout) ->
-    call_pool(PoolID, {acquire, ConnectionArgs, Ticket}, Timeout).
+-spec acquire(pool_id(), connection_args(), timeout()) ->
+    {ok, connection_pid()} |
+    {error, pool_not_found | pool_unavailable | {failed_to_start_connection | connection_failed, _}}.
+acquire(PoolID, ConnectionArgs, Timeout) ->
+    call_pool(PoolID, {acquire, ConnectionArgs}, Timeout).
 
--spec cancel_acquire(pool_id(), ticket()) -> ok.
-cancel_acquire(PoolID, Ticket) ->
-    gen_server:cast(via_tuple(PoolID), {cancel_acquire, self(), Ticket}).
+-spec free(pool_id(), connection_pid(), timeout()) ->
+    ok |
+    {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+free(PoolID, ConnectionPid, Timeout) ->
+    call_pool(PoolID, {free, ConnectionPid}, Timeout).
 
--spec free(pool_id(), connection(), timeout()) ->
-    ok | {error, pool_not_found | {lease_return_failed, connection_not_found | client_state_not_found}}.
-free(PoolID, Connection, Timeout) ->
-    call_pool(PoolID, {free, Connection}, Timeout).
-
--spec pool_status(pool_id(), timeout()) -> {ok, status_response()} | {error, pool_not_found}.
+-spec pool_status(pool_id(), timeout()) -> {ok, pool_status_response()} | {error, pool_not_found}.
 pool_status(PoolID, Timeout) ->
-    call_pool(PoolID, status, Timeout).
+    call_pool(PoolID, pool_status, Timeout).
 
 %% API helpers
 
@@ -164,85 +191,57 @@ get_pool_pid(PoolID) ->
 
 -spec init(list()) -> {ok, state()}.
 init([PoolOpts]) ->
-    {ok, new_state(PoolOpts)}.
+    State = new_state(PoolOpts),
+    _ = erlang:send_after(State#state.cleanup_interval, self(), ?GUNNER_CLEANUP()),
+    {ok, State}.
 
-%% @WARN Types here are not actually checked (as of Erlang/OTP 22 [erts-10.7.2.4]). Thanks, dialyzer.
 -spec handle_call
-    ({acquire, connection_args(), ticket()}, from(), state()) ->
+    ({acquire, connection_args()}, from(), state()) ->
         {noreply, state()} |
-        {reply, {error, pool_unavailable | {connection_failed, Reason :: _}}, state()};
-    ({free, connection()}, from(), state()) -> {reply, ok | {error, Reason}, state()} when
-        Reason :: {lease_return_failed, connection_not_found | client_state_not_found};
-    (status, from(), state()) -> {reply, {ok, status_response()}, state()}.
+        {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
+            state()};
+    ({free, connection_pid()}, from(), state()) ->
+        {reply, ok | {error, {invalid_pool_mode, loose} | invalid_connection_state}, state()};
+    (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
-handle_call({acquire, ConnectionArgs, Ticket}, From, St0) ->
-    GroupID = create_group_id(ConnectionArgs),
-    Result =
-        case acquire_connection_from_pool(GroupID, St0) of
-            {{ok, Connection}, St1} ->
-                handle_connection_acquired(Connection, GroupID, From, Ticket, St1);
-            {no_connection_available, St0} ->
-                handle_connection_creation(ConnectionArgs, GroupID, From, Ticket, St0)
-        end,
-    case Result of
-        {ok, St2} ->
-            {noreply, St2};
-        {error, _Reason} = Error ->
-            %% don't alter state on error
-            {reply, Error, St0}
+handle_call({acquire, ConnectionArgs}, From, State) ->
+    case handle_acquire_connection(ConnectionArgs, From, State) of
+        {{ok, {connection, Connection}}, NewState} ->
+            {reply, {ok, Connection}, NewState};
+        {{ok, connection_started}, NewState} ->
+            {noreply, NewState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
     end;
-handle_call({free, Connection}, {ClientPid, _}, St0) ->
-    Result =
-        case do_free_lease(ClientPid, Connection, St0) of
-            {{ok, GroupID}, St1} ->
-                handle_connection_free(Connection, GroupID, St1);
-            {{error, Reason}, _} ->
-                {error, {lease_return_failed, Reason}}
-        end,
-    case Result of
-        {ok, St2} ->
-            {reply, ok, St2};
-        {error, _Reason} = Error ->
-            {reply, Error, St0}
+handle_call({free, ConnectionPid}, From, State) ->
+    case handle_free_connection(ConnectionPid, From, State) of
+        {ok, NewState} ->
+            {reply, ok, NewState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
     end;
-handle_call(status, _From, St0) ->
-    {reply, {ok, get_pool_status(St0)}, St0};
+handle_call(pool_status, _From, State) ->
+    {reply, {ok, create_pool_status_response(State)}, State};
 handle_call(_Call, _From, _St) ->
     erlang:error(unexpected_call).
 
--spec handle_cast({cancel_acquire, client_pid(), ticket()}, state()) -> {noreply, state()}.
-handle_cast({cancel_acquire, ClientPid, Ticket}, St0) ->
-    Result =
-        case do_cancel_connection_request(Ticket, ClientPid, St0) of
-            {ok, St1} ->
-                {ok, St1};
-            {error, no_connection_request} ->
-                case do_cancel_lease(ClientPid, Ticket, St0) of
-                    {{ok, Connection, GroupID}, St1} ->
-                        handle_connection_free(Connection, GroupID, St1);
-                    {{error, Reason}, _} ->
-                        {error, {lease_cancel_failed, Reason}}
-                end
-        end,
-    case Result of
-        {ok, NewSt} ->
-            {noreply, NewSt};
-        {error, _Reason} ->
-            %@TODO Log this?
-            {noreply, St0}
-    end;
-handle_cast(_Cast, _St) ->
-    erlang:error(unexpected_cast).
+-spec handle_cast(any(), state()) -> {noreply, state()}.
+handle_cast(_Cast, St) ->
+    {noreply, St}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
-handle_info({gun_up, ConnPid, _Protocol}, St0) ->
-    {ok, St1} = handle_connection_started(ConnPid, St0),
-    {noreply, St1};
-handle_info({gun_down, _ConnPid, _Protocol, _Reason, _KilledStreams}, St0) ->
-    {noreply, St0};
-handle_info({'DOWN', Mref, process, ProcessPid, Reason}, St0) ->
-    {ok, St1} = handle_process_down(ProcessPid, Mref, Reason, St0),
-    {noreply, St1};
+handle_info(?GUNNER_CLEANUP(), State) ->
+    {ok, State1} = handle_cleanup(State),
+    _ = erlang:send_after(State#state.cleanup_interval, self(), ?GUNNER_CLEANUP()),
+    {noreply, State1};
+handle_info(?GUN_UP(ConnectionPid), State) ->
+    {ok, State1} = handle_connection_started(ConnectionPid, State),
+    {noreply, State1};
+handle_info(?GUN_DOWN(_ConnectionPid, _Reason), State) ->
+    {noreply, State};
+handle_info(?DOWN(Mref, ProcessPid, Reason), State) ->
+    {ok, State1} = handle_process_down(ProcessPid, Mref, Reason, State),
+    {noreply, State1};
 handle_info(_, _St0) ->
     erlang:error(unexpected_info).
 
@@ -251,472 +250,454 @@ terminate(_, _St) ->
     ok.
 
 %%
-%% Internal functions
-%%
 
 -spec new_state(pool_opts()) -> state().
 new_state(Opts) ->
-    #{
-        total_connection_limit => maps:get(total_connection_limit, Opts, ?DEFAULT_TOTAL_CONNECTION_LIMIT),
-        free_connection_limit => maps:get(free_connection_limit, Opts, ?DEFAULT_FREE_CONNECTION_LIMIT),
-        pool => gunner_connection_pool:new(),
-        clients => #{},
-        connection_requests => #{},
-        connection_monitors => #{},
-        client_assignments => #{}
+    MaxSize = maps:get(max_size, Opts, ?DEFAULT_MAX_SIZE),
+    #state{
+        mode = maps:get(mode, Opts, ?DEFAULT_MODE),
+        max_size = MaxSize,
+        min_size = maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),
+        current_size = 0,
+        max_connection_load = maps:get(max_connection_load, Opts, ?DEFAULT_MAX_CONNECTION_LOAD),
+        idx_authority = gunner_idx_authority:new(MaxSize),
+        counters_ref = counters:new(MaxSize, [atomics]),
+        connections = #{},
+        cleanup_interval = maps:get(cleanup_interval, Opts, ?DEFAULT_CLEANUP_INTERVAL),
+        max_connection_idle_age = maps:get(max_connection_idle_age, Opts, ?DEFAULT_MAX_CONNECTION_IDLE_AGE)
     }.
 
--spec create_group_id(connection_args()) -> connection_group_id().
+%%
+
+-spec handle_acquire_connection(connection_args(), requester(), state()) -> {Result, state()} | Error when
+    Result :: {ok, {connection, connection_pid()} | connection_started},
+    Error :: {error, {failed_to_start_connection, _Reason} | pool_unavailable}.
+handle_acquire_connection(ConnectionArgs, {ClientPid, _} = From, State) ->
+    GroupID = create_group_id(ConnectionArgs),
+    case acquire_connection_from_group(GroupID, State) of
+        {connection, ConnPid, St1} ->
+            {{ok, {connection, ConnPid}}, maybe_lock_connection(ConnPid, ClientPid, St1)};
+        no_connection ->
+            case handle_connection_creation(GroupID, ConnectionArgs, From, State) of
+                {ok, State1} ->
+                    {{ok, connection_started}, State1};
+                {error, _Reason} = Error ->
+                    Error
+            end
+    end.
+
+-spec create_group_id(connection_args()) -> group_id().
 create_group_id(ConnectionArgs) ->
     ConnectionArgs.
 
+-spec acquire_connection_from_group(group_id(), state()) -> {connection, connection_pid(), state()} | no_connection.
+acquire_connection_from_group(GroupID, State) ->
+    %ConnectionPids = [X || {_, X} <- lists:sort([{rand:uniform(), N} || N <- maps:keys(State#state.connections)])],
+    ConnectionPids = maps:keys(State#state.connections),
+    case find_suitable_connection(GroupID, ConnectionPids, State) of
+        {ok, ConnectionPid} ->
+            {ok, ConnectionSt} = get_connection_state(ConnectionPid, State),
+            ConnectionSt1 = ConnectionSt#connection_state{idle_count = 0},
+            {connection, ConnectionPid, set_connection_state(ConnectionPid, ConnectionSt1, State)};
+        {error, no_connection} ->
+            no_connection
+    end.
+
+-spec find_suitable_connection(group_id(), [connection_pid()], state()) ->
+    {ok, connection_pid()} | {error, no_connection}.
+find_suitable_connection(_GroupID, [], _State) ->
+    {error, no_connection};
+find_suitable_connection(GroupID, [Pid | Rest], State) ->
+    case get_connection_state(Pid, State) of
+        {ok, #connection_state{status = {up, unlocked}, group_id = GroupID, idx = Idx}} ->
+            case is_connection_available(Idx, State) of
+                true ->
+                    {ok, Pid};
+                false ->
+                    find_suitable_connection(GroupID, Rest, State)
+            end;
+        _ ->
+            find_suitable_connection(GroupID, Rest, State)
+    end.
+
+-spec is_connection_available(connection_idx(), state()) -> boolean().
+is_connection_available(Idx, State) ->
+    ConnectionLoad = get_connection_load(Idx, State),
+    ConnectionLoad < State#state.max_connection_load.
+
+-spec get_connection_load(connection_idx(), state()) -> size().
+get_connection_load(Idx, State) ->
+    counters:get(State#state.counters_ref, Idx).
+
 %%
 
--spec handle_connection_acquired(connection(), connection_group_id(), from(), ticket(), state()) ->
-    {ok, state()} | {error, Reason :: _}.
-handle_connection_acquired(Connection, GroupID, Requester, Ticket, St0) ->
-    %% assign connection to client state and reply
-    St1 = return_connection_to_client(Connection, Requester, GroupID, Ticket, St0),
-    {ok, St1}.
-
--spec handle_connection_creation(connection_args(), connection_group_id(), from(), ticket(), state()) ->
-    {ok, state()} | {error, pool_unavailable | {connection_failed, Reason :: _}}.
-handle_connection_creation(ConnectionArgs, GroupID, Requester, Ticket, St0) ->
-    case process_create_connection(ConnectionArgs, St0) of
-        {ok, ConnectionPid, St1} ->
-            ConnRequestSt = create_connection_request(Requester, GroupID, Ticket),
-            {ok, save_connection_request(ConnectionPid, ConnRequestSt, St1)};
-        {error, _Reason} = Error ->
-            Error
+-spec handle_free_connection(connection_pid(), requester(), state()) -> {Result, state()} | Error when
+    Result :: ok,
+    Error :: {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+handle_free_connection(_ConnectionPid, _From, #state{mode = loose}) ->
+    {error, {invalid_pool_mode, loose}};
+handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mode = locking}) ->
+    case get_connection_state(ConnectionPid, State) of
+        {ok, #connection_state{status = {up, {locked, ClientPid}}} = ConnSt} ->
+            ConnSt1 = ConnSt#connection_state{idle_count = 0},
+            State1 = set_connection_state(ConnectionPid, ConnSt1, State),
+            {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
+        {ok, #connection_state{}} ->
+            {error, invalid_connection_state};
+        {error, no_state} ->
+            {error, connection_not_found}
     end.
 
 %%
 
--spec handle_connection_started(connection(), state()) -> {ok, state()} | {error, connection_not_requested}.
-handle_connection_started(Connection, St0) ->
-    case get_connection_request(Connection, St0) of
-        {ok, #{group_id := GroupID, requester := undefined}} ->
-            %% original requester has since then cancelled the request
-            %% assign connection to the pool and get out
-            {ok, St1} = assign_connection_to_pool(Connection, GroupID, St0),
-            St2 = remove_connection_request(Connection, St1),
-            {ok, St2};
-        {ok, #{group_id := GroupID, requester := Requester, ticket := Ticket}} ->
-            {ok, St1} = assign_connection_to_pool(Connection, GroupID, St0),
-            {{ok, Connection0}, St2} = acquire_connection_from_pool(GroupID, St1),
-            St3 = return_connection_to_client(Connection0, Requester, GroupID, Ticket, St2),
-            St4 = remove_connection_request(Connection, St3),
-            {ok, St4};
-        not_found ->
-            {error, connection_not_requested}
+-spec get_connection_state(connection_pid(), state()) -> {ok, connection_state()} | {error, no_state}.
+get_connection_state(Pid, State) ->
+    case maps:get(Pid, State#state.connections, undefined) of
+        #connection_state{} = ConnState ->
+            {ok, ConnState};
+        undefined ->
+            {error, no_state}
     end.
+
+-spec set_connection_state(connection_pid(), connection_state(), state()) -> state().
+set_connection_state(Pid, Connection, State) ->
+    State#state{connections = maps:put(Pid, Connection, State#state.connections)}.
+
+-spec remove_connection_state(connection_pid(), state()) -> state().
+remove_connection_state(Pid, State) ->
+    State#state{connections = maps:without([Pid], State#state.connections)}.
 
 %%
 
--spec handle_connection_closed(connection(), state()) -> {ok, state()} | {error, Reason :: _}.
-handle_connection_closed(Connection, St0 = #{pool := PoolSt0}) ->
-    case gunner_connection_pool:is_busy(Connection, PoolSt0) of
+-spec new_connection_idx(state()) -> {connection_idx(), state()}.
+new_connection_idx(State) ->
+    {ok, Idx, NewAthState} = gunner_idx_authority:get_index(State#state.idx_authority),
+    {Idx, State#state{idx_authority = NewAthState}}.
+
+-spec free_connection_idx(connection_idx(), state()) -> state().
+free_connection_idx(Idx, State) ->
+    {ok, NewAthState} = gunner_idx_authority:free_index(Idx, State#state.idx_authority),
+    ok = counters:put(State#state.counters_ref, Idx, 0),
+    State#state{idx_authority = NewAthState}.
+
+%%
+
+-spec handle_connection_creation(group_id(), connection_args(), requester(), state()) ->
+    {ok, state()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}}.
+handle_connection_creation(GroupID, ConnectionArgs, Requester, State) ->
+    case is_pool_available(State) of
         true ->
-            {{ok, GroupID}, St1} = do_free_lease(Connection, St0),
-            with_pool(St1, fun(PoolSt) ->
-                {ok, PoolSt1} = gunner_connection_pool:free(Connection, GroupID, PoolSt),
-                gunner_connection_pool:remove(Connection, GroupID, PoolSt1)
-            end);
-        false ->
-            with_pool(St0, fun(PoolSt) ->
-                {ok, GroupID} = gunner_connection_pool:get_assignment(Connection, PoolSt),
-                gunner_connection_pool:remove(Connection, GroupID, PoolSt)
-            end)
-    end.
-
-%%
-
--spec handle_connection_free(connection(), connection_group_id(), state()) -> {ok, state()}.
-handle_connection_free(Connection, GroupID, St0 = #{free_connection_limit := FreeLimit}) ->
-    {Result, St1} = with_pool(St0, fun(PoolSt) ->
-        %% sanity check
-        {ok, GroupID} = gunner_connection_pool:get_assignment(Connection, PoolSt),
-        {ok, PoolSt1} = gunner_connection_pool:free(Connection, GroupID, PoolSt),
-        case is_pool_oversized(PoolSt1, FreeLimit) of
-            true ->
-                {ok, PoolSt2} = gunner_connection_pool:remove(Connection, GroupID, PoolSt1),
-                {{ok, pool_shrinked}, PoolSt2};
-            false ->
-                {ok, PoolSt1}
-        end
-    end),
-    case Result of
-        {ok, pool_shrinked} ->
-            process_kill_connection(Connection, St1);
-        ok ->
-            {ok, St1}
-    end.
-
-%%
-
--spec handle_process_down(pid(), monitor_ref(), Reason :: any(), state()) -> {ok, state()}.
-handle_process_down(ProcessPid, MRef, Reason, St0) ->
-    %%@TODO All of this really needs to be refactored
-    case is_client_process(ProcessPid, St0) of
-        true ->
-            handle_client_death(ProcessPid, St0);
-        false ->
-            handle_connection_death(ProcessPid, MRef, Reason, St0)
-    end.
-
--spec is_client_process(pid(), state()) -> boolean().
-is_client_process(ProcessPid, #{clients := Clients}) ->
-    client_state_exists(ProcessPid, Clients).
-
-%%
-
--spec handle_connection_death(connection(), monitor_ref(), Reason :: any(), state()) -> {ok, state()}.
-handle_connection_death(Connection, MRef, Reason, St0) ->
-    MRef = get_connection_monitor(Connection, St0),
-    case connection_request_exists(Connection, St0) of
-        true ->
-            handle_connection_start_failed(Connection, Reason, St0);
-        false ->
-            handle_connection_closed(Connection, St0)
-    end.
-
-%%
-
--spec handle_client_death(client_pid(), state()) -> {ok, state()}.
-handle_client_death(ClientPid, St0) ->
-    {{ok, Leases}, St1} = with_client_state(ClientPid, St0, fun(ClientSt0) ->
-        {Leases, ClientSt1} = gunner_pool_client_state:purge_leases(ClientSt0),
-        ok = gunner_pool_client_state:destroy(ClientSt1),
-        {{ok, Leases}, ClientSt1}
-    end),
-    St2 = remove_client_state(ClientPid, St1),
-    return_all_leases(Leases, St2).
-
-return_all_leases([], St) ->
-    {ok, St};
-return_all_leases([{Connection, _Ticket, GroupID} | Rest], St0) ->
-    {ok, St1} = handle_connection_free(Connection, GroupID, St0),
-    return_all_leases(Rest, St1).
-
-%%
-
--spec handle_connection_start_failed(connection(), Reason :: any(), state()) ->
-    {ok, state()} | {error, connection_not_requested}.
-handle_connection_start_failed(Connection, Reason, St0) ->
-    case get_connection_request(Connection, St0) of
-        {ok, #{requester := undefined}} ->
-            {ok, remove_connection_request(Connection, St0)};
-        {ok, #{requester := Requester}} ->
-            _ = gen_server:reply(Requester, {error, {connection_failed, Reason}}),
-            {ok, remove_connection_request(Connection, St0)};
-        not_found ->
-            {error, connection_not_requested}
-    end.
-
-%%
-
--spec do_cancel_connection_request(ticket(), client_pid(), state()) -> {ok, state()} | {error, no_connection_request}.
-do_cancel_connection_request(Ticket, ClientPid, St) ->
-    case find_connection_request(Ticket, ClientPid, St) of
-        {ok, ConnectionPid, ConnRequestSt} ->
-            NewConnRequestSt = ConnRequestSt#{requester => undefined},
-            {ok, save_connection_request(ConnectionPid, NewConnRequestSt, St)};
-        {error, not_found} ->
-            {error, no_connection_request}
-    end.
-
--spec find_connection_request(ticket(), client_pid(), state()) ->
-    {ok, connection(), connection_request()} | {error, not_found}.
-find_connection_request(Ticket, ClientPid, #{connection_requests := ConnectionRequests}) ->
-    do_find_connection_request(Ticket, ClientPid, maps:to_list(ConnectionRequests)).
-
--spec do_find_connection_request(ticket(), client_pid(), list()) ->
-    {ok, connection(), connection_request()} | {error, not_found}.
-do_find_connection_request(_Ticket, _ClientPid, []) ->
-    {error, not_found};
-do_find_connection_request(Ticket, ClientPid, [{ClientPid, Request = #{ticket := Ticket}} | _Rest]) ->
-    {ok, ClientPid, Request};
-do_find_connection_request(Ticket, ClientPid, [_ | Rest]) ->
-    do_find_connection_request(Ticket, ClientPid, Rest).
-
-%%
-
--spec assign_connection_to_pool(connection(), connection_group_id(), state()) ->
-    {ok | {error, connection_exists}, state()}.
-assign_connection_to_pool(Connection, GroupID, St0) ->
-    with_pool(St0, fun(PoolSt) ->
-        case gunner_connection_pool:assign(Connection, GroupID, PoolSt) of
-            {ok, _PoolSt1} = Ok ->
-                Ok;
-            {error, _Reason} = Error ->
-                {Error, PoolSt}
-        end
-    end).
-
--spec acquire_connection_from_pool(connection_group_id(), state()) ->
-    {AcquireResult :: {ok, connection()} | no_connection_available, state()}.
-acquire_connection_from_pool(GroupID, St0) ->
-    with_pool(St0, fun(PoolSt) ->
-        case gunner_connection_pool:acquire(GroupID, PoolSt) of
-            {ok, Connection, PoolSt1} ->
-                {{ok, Connection}, PoolSt1};
-            {ok, no_connection} ->
-                {no_connection_available, PoolSt};
-            {error, group_not_found} ->
-                {no_connection_available, PoolSt}
-        end
-    end).
-
--spec return_connection_to_client(connection(), from(), connection_group_id(), ticket(), state()) -> state().
-return_connection_to_client(Connection, {ClientPid, _} = From, GroupID, Ticket, St0) ->
-    {ok, St1} = do_save_lease(Connection, ClientPid, Ticket, GroupID, St0),
-    _ = gen_server:reply(From, {ok, Connection}),
-    St1.
-
-%%
-
--spec do_save_lease(connection(), client_pid(), ticket(), connection_group_id(), state()) -> {ok, state()}.
-do_save_lease(Connection, ClientPid, Ticket, GroupID, St0) ->
-    St1 = ensure_client_state_exists(ClientPid, St0),
-    {Result, St2} = with_client_state(ClientPid, St1, fun(ClientSt0) ->
-        ClientSt1 = gunner_pool_client_state:register_lease(Connection, Ticket, GroupID, ClientSt0),
-        {ok, ClientSt1}
-    end),
-    {Result, save_client_assignment(Connection, ClientPid, St2)}.
-
--spec do_free_lease(connection(), state()) -> {FreeLeaseResult, state()} when
-    FreeLeaseResult :: {ok, connection_group_id()} | {error, connection_not_found | client_state_not_found}.
-do_free_lease(Connection, St0) ->
-    ClientPid = get_client_assignment(Connection, St0),
-    do_free_lease(ClientPid, Connection, St0).
-
--spec do_free_lease(client_pid(), connection(), state()) -> {FreeLeaseResult, state()} when
-    FreeLeaseResult :: {ok, connection_group_id()} | {error, connection_not_found | client_state_not_found}.
-do_free_lease(ClientPid, Connection, St0) ->
-    {Result, St1} = with_client_state(ClientPid, St0, fun(ClientSt0) ->
-        %% @TODO it is now possible to get rid of ReturnTo in client leases, consider
-        case gunner_pool_client_state:free_lease(Connection, ClientSt0) of
-            {ok, ConnectionGroupId, ClientSt1} ->
-                {{ok, ConnectionGroupId}, ClientSt1};
-            {error, _Reason} = Error ->
-                {Error, ClientSt0}
-        end
-    end),
-    {Result, remove_client_assignment(Connection, St1)}.
-
--spec do_cancel_lease(client_pid(), ticket(), state()) -> {CancelLeaseResult, state()} when
-    CancelLeaseResult ::
-        {ok, connection(), connection_group_id()} | {error, connection_not_found | client_state_not_found}.
-do_cancel_lease(ClientPid, Ticket, St0) ->
-    {Result, St1} = with_client_state(ClientPid, St0, fun(ClientSt0) ->
-        case gunner_pool_client_state:cancel_lease(Ticket, ClientSt0) of
-            {ok, Connection, ConnectionGroupId, ClientSt1} ->
-                {{ok, Connection, ConnectionGroupId}, ClientSt1};
-            {error, _Reason} = Error ->
-                {Error, ClientSt0}
-        end
-    end),
-    case Result of
-        {ok, Connection, _} ->
-            {Result, remove_client_assignment(Connection, St1)};
-        {error, _} = Error ->
-            {Error, St1}
-    end.
-
-%%
-
--spec get_client_assignment(connection(), state()) -> client_pid().
-get_client_assignment(Connection, #{client_assignments := Assignments}) ->
-    maps:get(Connection, Assignments).
-
--spec save_client_assignment(connection(), client_pid(), state()) -> state().
-save_client_assignment(Connection, ClientPid, St = #{client_assignments := Assignments}) ->
-    St#{client_assignments => Assignments#{Connection => ClientPid}}.
-
--spec remove_client_assignment(connection(), state()) -> state().
-remove_client_assignment(Connection, St = #{client_assignments := Assignments}) ->
-    St#{client_assignments => maps:without([Connection], Assignments)}.
-
-%%
-
--spec process_create_connection(connection_args(), state()) ->
-    {ok, connection(), state()} |
-    {error, pool_unavailable} |
-    {error, {connection_failed, Reason :: _}}.
-process_create_connection(ConnectionArgs, St0 = #{pool := PoolSt}) ->
-    TotalLimit = get_total_limit(St0),
-    %% not sure if bug or feature
-    PendingRequestCount = get_pending_request_count(St0),
-    case is_pool_available(PoolSt, TotalLimit - PendingRequestCount) of
-        true ->
-            case start_connection_process(ConnectionArgs) of
-                {ok, Connection, MRef} ->
-                    {ok, Connection, save_connection_monitor(Connection, MRef, St0)};
+            {Idx, State1} = new_connection_idx(State),
+            case open_gun_connection(ConnectionArgs, Idx, State) of
+                {ok, Pid, Mref} ->
+                    ConnectionState = new_connection_state(Requester, GroupID, Idx, Pid, Mref),
+                    {ok, set_connection_state(Pid, ConnectionState, inc_pool_size(State1))};
                 {error, Reason} ->
-                    {error, {connection_failed, Reason}}
+                    {error, {failed_to_start_connection, Reason}}
             end;
         false ->
             {error, pool_unavailable}
     end.
 
--spec process_kill_connection(connection(), state()) -> {ok, state()}.
-process_kill_connection(Connection, St0) ->
-    MRef = get_connection_monitor(Connection, St0),
-    ok = kill_connection_process(Connection, MRef),
-    {ok, remove_connection_monitor(Connection, St0)}.
+-spec is_pool_available(state()) -> boolean().
+is_pool_available(State) ->
+    State#state.current_size < get_total_limit(State).
 
--spec is_pool_available(connection_pool(), Limit :: size()) -> boolean().
-is_pool_available(PoolSt, Limit) ->
-    case gunner_connection_pool:total_count(PoolSt) of
-        Total when Total < Limit ->
-            true;
-        Total when Total >= Limit ->
-            false
-    end.
+-spec get_total_limit(state()) -> size().
+get_total_limit(State) ->
+    State#state.max_size.
 
--spec is_pool_oversized(connection_pool(), Limit :: size()) -> boolean().
-is_pool_oversized(PoolSt, Limit) ->
-    case gunner_connection_pool:free_count(PoolSt) of
-        Free when Free > Limit ->
-            true;
-        Free when Free =< Limit ->
-            false
-    end.
-
-%%
-
--spec create_connection_request(from(), connection_group_id(), ticket()) -> connection_request().
-create_connection_request(Requester, GroupID, Ticket) ->
-    #{
-        requester => Requester,
-        group_id => GroupID,
-        ticket => Ticket
+-spec new_connection_state(requester(), group_id(), connection_idx(), connection_pid(), mref()) -> connection_state().
+new_connection_state(Requester, GroupID, Idx, Pid, Mref) ->
+    #connection_state{
+        status = {starting, Requester},
+        group_id = GroupID,
+        idx = Idx,
+        pid = Pid,
+        mref = Mref
     }.
 
--spec connection_request_exists(connection(), state()) -> boolean().
-connection_request_exists(ConnectionPid, #{connection_requests := Requests}) ->
-    maps:is_key(ConnectionPid, Requests).
-
--spec save_connection_request(connection(), connection_request(), state()) -> state().
-save_connection_request(ConnectionPid, ConnRequestSt, St = #{connection_requests := Requests0}) ->
-    Requests1 = Requests0#{ConnectionPid => ConnRequestSt},
-    St#{connection_requests => Requests1}.
-
--spec remove_connection_request(connection(), state()) -> state().
-remove_connection_request(ConnectionPid, St = #{connection_requests := Requests}) ->
-    St#{connection_requests => maps:without([ConnectionPid], Requests)}.
-
--spec get_connection_request(connection(), state()) -> {ok, connection_request()} | not_found.
-get_connection_request(ConnectionPid, #{connection_requests := Requests0}) ->
-    case maps:get(ConnectionPid, Requests0, undefined) of
-        ConnRequestSt when ConnRequestSt =/= undefined ->
-            {ok, ConnRequestSt};
-        undefined ->
-            not_found
-    end.
-
 %%
 
--spec start_connection_process(connection_args()) -> {ok, connection(), monitor_ref()} | {error, Reason :: any()}.
-start_connection_process({Host, Port}) ->
-    ClientOpts = get_gun_client_opts(),
-    case gun:open(Host, Port, ClientOpts#{retry => 0}) of
-        {ok, ConnPid} ->
-            MRef = monitor(process, ConnPid),
-            {ok, ConnPid, MRef};
+-spec open_gun_connection(connection_args(), connection_idx(), state()) ->
+    {ok, connection_pid(), mref()} | {error, Reason :: _}.
+open_gun_connection({Host, Port}, Idx, State) ->
+    Opts = get_gun_opts(Idx, State),
+    case gun:open(Host, Port, Opts) of
+        {ok, Connection} ->
+            Mref = erlang:monitor(process, Connection),
+            {ok, Connection, Mref};
         {error, _Reason} = Error ->
             Error
     end.
 
--spec kill_connection_process(connection(), monitor_ref()) -> ok.
-kill_connection_process(ConnectionPid, MRef) ->
-    true = demonitor(MRef, [flush]),
-    gun:close(ConnectionPid).
-
--spec get_gun_client_opts() -> gun_client_opts().
-get_gun_client_opts() ->
-    genlib_app:env(gunner, client_opts, ?DEFAULT_CLIENT_OPTS).
-
-%% Helpers
-
--spec with_pool(state(), fun((connection_pool()) -> {Result, connection_pool()})) -> {Result, state()} when
-    Result :: any().
-with_pool(St = #{pool := PoolSt}, Fun) ->
-    case Fun(PoolSt) of
-        {Result, PoolSt} ->
-            {Result, St};
-        {Result, NewPoolSt} ->
-            {Result, St#{pool => NewPoolSt}}
-    end.
-
--spec with_client_state(client_pid(), state(), fun((client_state()) -> {Result, client_state()})) ->
-    {Result, state()}
-when
-    Result :: {error, client_state_not_found} | any().
-with_client_state(ClientPid, St = #{clients := Clients0}, Fun) ->
-    case get_client_state(ClientPid, Clients0) of
-        ClientSt when ClientSt =/= undefined ->
-            case Fun(ClientSt) of
-                {Result, ClientSt} ->
-                    {Result, St};
-                {Result, NewClientSt} ->
-                    {Result, St#{clients => save_client_state(ClientPid, NewClientSt, Clients0)}}
-            end;
-        undefined ->
-            {{error, client_state_not_found}, St}
-    end.
-
--spec ensure_client_state_exists(client_pid(), state()) -> state().
-ensure_client_state_exists(ClientPid, St0 = #{clients := Clients0}) ->
-    case client_state_exists(ClientPid, Clients0) of
-        true ->
-            St0;
-        false ->
-            ClientSt0 = gunner_pool_client_state:new(ClientPid),
-            St0#{clients => save_client_state(ClientPid, ClientSt0, Clients0)}
-    end.
-
--spec client_state_exists(client_pid(), clients()) -> boolean().
-client_state_exists(ClientPid, Clients) ->
-    maps:is_key(ClientPid, Clients).
-
--spec get_client_state(client_pid(), clients()) -> client_state() | undefined.
-get_client_state(ClientPid, Clients) ->
-    maps:get(ClientPid, Clients, undefined).
-
--spec save_client_state(client_pid(), client_state(), clients()) -> clients().
-save_client_state(ClientPid, ClientSt, Clients) ->
-    Clients#{ClientPid => ClientSt}.
-
--spec remove_client_state(client_pid(), state()) -> state().
-remove_client_state(ClientPid, St = #{clients := Clients}) ->
-    St#{clients => maps:without([ClientPid], Clients)}.
-
-%%
-
--spec save_connection_monitor(connection(), monitor_ref(), state()) -> state().
-save_connection_monitor(Connection, MRef, St = #{connection_monitors := Monitors}) ->
-    St#{connection_monitors => Monitors#{Connection => MRef}}.
-
--spec get_connection_monitor(connection(), state()) -> monitor_ref().
-get_connection_monitor(Connection, #{connection_monitors := Monitors}) ->
-    maps:get(Connection, Monitors).
-
--spec remove_connection_monitor(connection(), state()) -> state().
-remove_connection_monitor(Connection, St = #{connection_monitors := Monitors}) ->
-    St#{connection_monitors => maps:without([Connection], Monitors)}.
-
-%%
-
--spec get_pool_status(state()) -> status_response().
-get_pool_status(#{pool := PoolSt}) ->
-    #{
-        total_count => gunner_connection_pool:total_count(PoolSt),
-        free_count => gunner_connection_pool:free_count(PoolSt)
+-spec get_gun_opts(connection_idx(), state()) -> gun:opts().
+get_gun_opts(Idx, State) ->
+    Opts = genlib_app:env(gunner, client_opts, ?DEFAULT_CLIENT_OPTS),
+    EventHandler = maps:with([event_handler], Opts),
+    Opts#{
+        retry => 0,
+        %% Setup event handler and optionally pass through a custom one
+        event_handler =>
+            {gunner_gun_event_handler, EventHandler#{
+                counters_ref => State#state.counters_ref,
+                counters_idx => Idx,
+                streams => #{}
+            }}
     }.
 
-get_total_limit(#{total_connection_limit := TotalLimit}) ->
-    TotalLimit.
+-spec close_gun_connection(connection_pid()) -> ok.
+close_gun_connection(ConnectionPid) ->
+    ok = gun:close(ConnectionPid).
 
-get_pending_request_count(#{connection_requests := ConnectionRequests}) ->
-    maps:size(ConnectionRequests).
+%%
+
+-spec handle_connection_started(connection_pid(), state()) -> {ok, state()} | {error, invalid_connection_state}.
+handle_connection_started(ConnectionPid, State) ->
+    case get_connection_state(ConnectionPid, State) of
+        {ok, #connection_state{status = {starting, {ClientPid, _} = Requester}} = ConnSt} ->
+            ConnSt1 = ConnSt#connection_state{status = {up, unlocked}, idle_count = 0},
+            ok = reply_to_requester({ok, ConnectionPid}, Requester),
+            State1 = set_connection_state(ConnectionPid, ConnSt1, State),
+            {ok, maybe_lock_connection(ConnectionPid, ClientPid, State1)};
+        _ ->
+            {error, invalid_connection_state}
+    end.
+
+reply_to_requester(Message, Requester) ->
+    _ = gen_server:reply(Requester, Message),
+    ok.
+
+%%
+
+-spec handle_process_down(pid(), mref(), Reason :: _, state()) -> {ok, state()}.
+handle_process_down(ProcessPid, Mref, Reason, State) ->
+    case is_connection_process(ProcessPid, State) of
+        true ->
+            handle_connection_down(ProcessPid, Mref, Reason, State);
+        false ->
+            handle_client_down(ProcessPid, Mref, Reason, State)
+    end.
+
+-spec is_connection_process(pid(), state()) -> boolean().
+is_connection_process(ProcessPid, State) ->
+    maps:is_key(ProcessPid, State#state.connections).
+
+-spec handle_connection_down(connection_pid(), mref(), Reason :: _, state()) ->
+    {ok, state()} | {error, invalid_connection_state}.
+handle_connection_down(ConnectionPid, Mref, Reason, State) ->
+    case get_connection_state(ConnectionPid, State) of
+        {ok, #connection_state{status = {starting, Requester}, idx = Idx, mref = Mref}} ->
+            ok = reply_to_requester({error, {connection_failed, map_down_reason(Reason)}}, Requester),
+            State1 = free_connection_idx(Idx, State),
+            {ok, remove_connection_state(ConnectionPid, dec_pool_size(State1))};
+        {ok, #connection_state{status = {up, unlocked}, idx = Idx, mref = Mref}} ->
+            State1 = free_connection_idx(Idx, State),
+            {ok, remove_connection_state(ConnectionPid, dec_pool_size(State1))};
+        {ok, #connection_state{status = {up, {locked, ClientPid}}, idx = Idx, mref = Mref}} ->
+            State1 = remove_connection_from_client_state(ConnectionPid, ClientPid, State),
+            State2 = free_connection_idx(Idx, State1),
+            {ok, remove_connection_state(ConnectionPid, dec_pool_size(State2))};
+        {ok, #connection_state{status = inactive, mref = Mref}} ->
+            {ok, remove_connection_state(ConnectionPid, State)};
+        _ ->
+            {error, invalid_connection_state}
+    end.
+
+map_down_reason(noproc) ->
+    %% Connection could've died even before we put a monitor on it
+    %% Because of this, we have no idea what happened
+    %% @TODO Consider using the event handler for "soft" failures
+    unknown;
+map_down_reason(Reason) ->
+    Reason.
+
+-spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> {ok, state()} | {error, invalid_client_state}.
+handle_client_down(ClientPid, Mref, _Reason, State) ->
+    case get_client_state(ClientPid, State) of
+        {ok, #client_state{mref = Mref, connections = Connections}} ->
+            {ok, unlock_client_connections(Connections, State)};
+        _ ->
+            {error, invalid_client_state}
+    end.
+
+-spec unlock_client_connections([connection_pid()], state()) -> state().
+unlock_client_connections([], State) ->
+    State;
+unlock_client_connections([ConnectionPid | Rest], State) ->
+    State1 = do_unlock_connection(ConnectionPid, State),
+    unlock_client_connections(Rest, State1).
+
+%%
+
+-spec handle_cleanup(state()) -> {ok, state()}.
+handle_cleanup(State) ->
+    case State#state.current_size - State#state.min_size of
+        SizeBudget when SizeBudget > 0 ->
+            ConnectionPids = maps:keys(State#state.connections),
+            cleanup_connections(ConnectionPids, SizeBudget, State);
+        _SizeBudget ->
+            {ok, State}
+    end.
+
+-spec cleanup_connections([connection_pid()], integer(), state()) -> {ok, state()}.
+cleanup_connections([], _Budget, State) ->
+    {ok, State};
+cleanup_connections([Pid | Rest], SizeBudget, State) ->
+    {SizeBudget1, State1} = process_connection_cleanup(Pid, SizeBudget, State),
+    cleanup_connections(Rest, SizeBudget1, State1).
+
+-spec process_connection_cleanup(connection_pid(), integer(), state()) -> {integer(), state()}.
+process_connection_cleanup(Pid, SizeBudget, State) ->
+    {ok, ConnSt} = get_connection_state(Pid, State),
+    MaxAge = State#state.max_connection_idle_age,
+    ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
+    case ConnSt of
+        #connection_state{status = {up, _}, idle_count = IdleCount} when IdleCount < MaxAge, ConnLoad =:= 0 ->
+            NewConnectionSt = ConnSt#connection_state{idle_count = IdleCount + 1},
+            {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
+        #connection_state{status = {up, _}, idle_count = IdleCount, idx = Idx} when
+            IdleCount >= MaxAge, ConnLoad =:= 0, SizeBudget > 0
+        ->
+            NewConnectionSt = ConnSt#connection_state{status = inactive},
+            State1 = free_connection_idx(Idx, State),
+            {SizeBudget - 1, set_connection_state(Pid, NewConnectionSt, dec_pool_size(State1))};
+        #connection_state{status = {up, _}, idle_count = IdleCount} when
+            IdleCount >= MaxAge, ConnLoad =:= 0, SizeBudget =< 0
+        ->
+            NewConnectionSt = ConnSt#connection_state{idle_count = 0},
+            {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
+        #connection_state{status = {up, _}} when ConnLoad > 0 ->
+            NewConnectionSt = ConnSt#connection_state{idle_count = 0},
+            {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
+        #connection_state{status = inactive} ->
+            %% 'DOWN' will do everything else
+            ok = close_gun_connection(Pid),
+            {SizeBudget, State};
+        #connection_state{} ->
+            {SizeBudget, State}
+    end.
+
+%%
+
+-spec maybe_lock_connection(connection_pid(), client_pid(), state()) -> state().
+maybe_lock_connection(ConnectionPid, ClientPid, State = #state{mode = locking}) ->
+    lock_connection(ConnectionPid, ClientPid, State);
+maybe_lock_connection(_ConnectionPid, _ClientPid, State = #state{mode = loose}) ->
+    State.
+
+-spec lock_connection(connection_pid(), client_pid(), state()) -> state().
+lock_connection(ConnectionPid, ClientPid, State) ->
+    State1 = do_lock_connection(ConnectionPid, ClientPid, State),
+    ClientSt = get_or_create_client_state(ClientPid, State1),
+    ClientSt1 = do_add_connection_to_client(ConnectionPid, ClientSt),
+    set_client_state(ClientPid, ClientSt1, State1).
+
+-spec do_lock_connection(connection_pid(), client_pid(), state()) -> state().
+do_lock_connection(ConnectionPid, ClientPid, State) ->
+    {ok, ConnectionSt} = get_connection_state(ConnectionPid, State),
+    ConnectionSt1 = ConnectionSt#connection_state{status = {up, {locked, ClientPid}}},
+    set_connection_state(ConnectionPid, ConnectionSt1, State).
+
+-spec do_add_connection_to_client(connection_pid(), client_state()) -> client_state().
+do_add_connection_to_client(ConnectionPid, ClientSt = #client_state{connections = Connections}) ->
+    ClientSt#client_state{connections = [ConnectionPid | Connections]}.
+
+-spec unlock_connection(connection_pid(), client_pid(), state()) -> state().
+unlock_connection(ConnectionPid, ClientPid, State) ->
+    State1 = do_unlock_connection(ConnectionPid, State),
+    remove_connection_from_client_state(ConnectionPid, ClientPid, State1).
+
+-spec do_unlock_connection(connection_pid(), state()) -> state().
+do_unlock_connection(ConnectionPid, State) ->
+    {ok, ConnectionSt} = get_connection_state(ConnectionPid, State),
+    ConnectionSt1 = ConnectionSt#connection_state{status = {up, unlocked}},
+    set_connection_state(ConnectionPid, ConnectionSt1, State).
+
+-spec remove_connection_from_client_state(connection_pid(), client_pid(), state()) -> state().
+remove_connection_from_client_state(ConnectionPid, ClientPid, State) ->
+    {ok, ClientSt} = get_client_state(ClientPid, State),
+    ClientSt1 = do_remove_connection_from_client(ConnectionPid, ClientSt),
+    case ClientSt1#client_state.connections of
+        [] ->
+            true = destroy_client_state(ClientSt1),
+            remove_client_state(ClientPid, State);
+        _ ->
+            set_client_state(ClientPid, ClientSt1, State)
+    end.
+
+-spec do_remove_connection_from_client(connection_pid(), client_state()) -> client_state().
+do_remove_connection_from_client(ConnectionPid, ClientSt = #client_state{connections = Connections}) ->
+    ClientSt#client_state{connections = lists:delete(ConnectionPid, Connections)}.
+
+%%
+
+-spec get_or_create_client_state(client_pid(), state()) -> client_state().
+get_or_create_client_state(ClientPid, State) ->
+    case get_client_state(ClientPid, State) of
+        {ok, ClientSt} ->
+            ClientSt;
+        {error, no_state} ->
+            create_client_state(ClientPid)
+    end.
+
+-spec create_client_state(client_pid()) -> client_state().
+create_client_state(ClientPid) ->
+    Mref = erlang:monitor(process, ClientPid),
+    #client_state{
+        connections = [],
+        mref = Mref
+    }.
+
+-spec destroy_client_state(client_state()) -> true.
+destroy_client_state(#client_state{mref = Mref}) ->
+    true = erlang:demonitor(Mref, [flush]).
+
+-spec get_client_state(client_pid(), state()) -> {ok, client_state()} | {error, no_state}.
+get_client_state(Pid, State) ->
+    case maps:get(Pid, State#state.clients, undefined) of
+        #client_state{} = ClientSt ->
+            {ok, ClientSt};
+        undefined ->
+            {error, no_state}
+    end.
+
+-spec set_client_state(client_pid(), client_state(), state()) -> state().
+set_client_state(Pid, ClientSt, State) ->
+    State#state{clients = maps:put(Pid, ClientSt, State#state.clients)}.
+
+-spec remove_client_state(client_pid(), state()) -> state().
+remove_client_state(Pid, State) ->
+    State#state{clients = maps:without([Pid], State#state.clients)}.
+
+%%
+
+-spec inc_pool_size(state()) -> state().
+inc_pool_size(State) ->
+    offset_pool_size(State, 1).
+
+-spec dec_pool_size(state()) -> state().
+dec_pool_size(State) ->
+    offset_pool_size(State, -1).
+
+-spec offset_pool_size(state(), integer()) -> state().
+offset_pool_size(State, Inc) ->
+    State#state{current_size = State#state.current_size + Inc}.
+
+-spec create_pool_status_response(state()) -> pool_status_response().
+create_pool_status_response(State) ->
+    #{
+        total_connections => State#state.current_size,
+        available_connections => get_available_connections_count(State#state.connections)
+    }.
+
+-spec get_available_connections_count(connections()) -> size().
+get_available_connections_count(Connections) ->
+    maps:fold(
+        fun
+            (_K, #connection_state{status = {up, unlocked}}, Acc) -> Acc + 1;
+            (_K, #connection_state{}, Acc) -> Acc
+        end,
+        0,
+        Connections
+    ).

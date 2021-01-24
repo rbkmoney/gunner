@@ -14,6 +14,7 @@ gun(init) ->
     _ = start_mock_server(),
     [{apps, [App || {ok, App} <- Apps]}];
 gun({input, _State}) ->
+    _ = flush(),
     valid_host();
 gun({stop, State}) ->
     _ = stop_mock_server(),
@@ -24,13 +25,9 @@ gun({stop, State}) ->
 -spec bench_gun(_, _) -> _.
 bench_gun({Host, Port}, _) ->
     {ok, Connection} = gun:open(Host, Port, #{retry => 0}),
-    ok =
-        case gun:await_up(Connection, 1000) of
-            {ok, _} ->
-                ok = gun:close(Connection);
-            {error, Reason} ->
-                {error, {unavailable, Reason}}
-        end.
+    {ok, _} = gun:await_up(Connection, 1000),
+    _ = gun:get(Connection, <<"/">>),
+    _ = gun:shutdown(Connection).
 
 %%
 
@@ -40,7 +37,7 @@ start_mock_server() ->
     end).
 
 start_mock_server(HandlerFun) ->
-    Conf = #{request_timeout => 5000},
+    Conf = #{request_timeout => infinity},
     _ = mock_http_server:start(default, 8080, HandlerFun, Conf),
     _ = mock_http_server:start(alternative_1, 8086, HandlerFun, Conf),
     _ = mock_http_server:start(alternative_2, 8087, HandlerFun, Conf),
@@ -58,3 +55,9 @@ valid_host() ->
         {"localhost", 8087}
     ],
     lists:nth(rand:uniform(length(Hosts)), Hosts).
+
+flush() ->
+    receive
+        _ -> flush()
+    after 0 -> ok
+    end.
