@@ -27,14 +27,46 @@
 
 -type pool() :: pid().
 -type pool_id() :: atom().
+
+%% @doc Mode of operation: loose (default) or locking
+%% Pools in loose mode do not enforce a guarantee that connections are acquired by only one process at a time
+%% This can be especially evident in small pools with spikes of load, where the first connection in pool will be
+%% returned to the client multiple times before any one of them actually uses the connection,
+%% thus making it unfit for acquiring
+%% Pools in locking mode do not have this issue, but require connections to be freed manually by client processes
+%% (by calling gunner:free). Connections will also be freed automatically in event of clients death.
+%% Note that locking does not exclude connections from clean-up procedure, therefore locked but unused connections
+%% will still be killed when necessary
 -type pool_mode() :: loose | locking.
+
+%% @doc Interval at which the cleanup operation in pool is performed, in ms
+%% Cleanup is not quaranteed to be excecuted every X ms, instead a minimum of X ms is guaranteed to
+%% pass after the previous cleanup is finished
+-type cleanup_interval() :: timeout().
+
+%% @doc Maximum amount of opened streams for connection to become unavailable to be acquired, almost always 1.
+-type max_connection_load() :: max_connection_load().
+
+%% @doc Maximum amount time measured in cleanup cycles a connection must remain without load or
+%% acquires before it is killed.
+-type max_connection_idle_age() :: size().
+
+%% @doc Maximum amount of connections in pool. When this value is reached, and a new connection must be opened
+%% to satisfy an 'acquire' pool_unavailable will be returned instead.
+-type max_size() :: size().
+
+%% @doc Mininum amount of connections kept in pool. This is a soft limit, so connections must be first opened
+%% naturally by 'acquire' requests. When pool size is at this value, no more connections are killed by
+%% cleanup operations.
+-type min_size() :: size().
+
 -type pool_opts() :: #{
     mode => pool_mode(),
-    cleanup_interval => timeout(),
-    max_connection_load => size(),
-    max_connection_idle_age => size(),
-    max_size => size(),
-    min_size => size()
+    cleanup_interval => cleanup_interval(),
+    max_connection_load => max_connection_load(),
+    max_connection_idle_age => max_connection_idle_age(),
+    max_size => max_size(),
+    min_size => min_size()
 }.
 
 -type group_id() :: term().
@@ -45,8 +77,15 @@
 
 -export_type([pool/0]).
 -export_type([pool_id/0]).
+
 -export_type([pool_mode/0]).
+-export_type([cleanup_interval/0]).
+-export_type([max_connection_load/0]).
+-export_type([max_connection_idle_age/0]).
+-export_type([max_size/0]).
+-export_type([min_size/0]).
 -export_type([pool_opts/0]).
+
 -export_type([group_id/0]).
 -export_type([pool_status_response/0]).
 
@@ -58,12 +97,12 @@
     clients = #{} :: clients(),
     counters_ref :: counters:counters_ref(),
     idx_authority :: gunner_idx_authority:t(),
-    max_size :: size(),
-    min_size :: size(),
+    max_size :: max_size(),
+    min_size :: min_size(),
     current_size :: size(),
-    max_connection_load :: size(),
-    max_connection_idle_age :: size(),
-    cleanup_interval :: timeout()
+    max_connection_load :: max_connection_load(),
+    max_connection_idle_age :: max_connection_idle_age(),
+    cleanup_interval :: cleanup_interval()
 }).
 
 -type state() :: #state{}.
@@ -403,7 +442,7 @@ handle_connection_creation(GroupID, ConnectionArgs, Requester, State) ->
 is_pool_available(State) ->
     State#state.current_size < get_total_limit(State).
 
--spec get_total_limit(state()) -> size().
+-spec get_total_limit(state()) -> max_size().
 get_total_limit(State) ->
     State#state.max_size.
 
@@ -553,7 +592,9 @@ process_connection_cleanup(Pid, SizeBudget, State) ->
     MaxAge = State#state.max_connection_idle_age,
     ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
     case ConnSt of
-        #connection_state{status = {up, _}, idle_count = IdleCount} when IdleCount < MaxAge, ConnLoad =:= 0 ->
+        #connection_state{status = {up, _}, idle_count = IdleCount} when
+            IdleCount < MaxAge, ConnLoad =:= 0, SizeBudget > 0
+        ->
             NewConnectionSt = ConnSt#connection_state{idle_count = IdleCount + 1},
             {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
         #connection_state{status = {up, _}, idle_count = IdleCount, idx = Idx} when

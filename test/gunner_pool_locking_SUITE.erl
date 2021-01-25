@@ -44,7 +44,7 @@
 -define(POOL_CLEANUP_INTERVAL, 100).
 -define(POOL_MAX_AGE, 1).
 
--define(H_CLEAN_TIMEOUT, (?POOL_CLEANUP_INTERVAL * ?POOL_MAX_AGE) + ?POOL_CLEANUP_INTERVAL).
+-define(H_CLEANUP_TIMEOUT, (?POOL_CLEANUP_INTERVAL * ?POOL_MAX_AGE) + ?POOL_CLEANUP_INTERVAL).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
@@ -391,7 +391,7 @@ pool_group_isolation_test(C) ->
 -spec pool_group_shared_free_limit_test(config()) -> test_return().
 pool_group_shared_free_limit_test(C) ->
     Counters = get_counters(?POOL_NAME(C)),
-    %% This test relies on MAX_FREE_CONNECTIONS being 2
+    %% This test relies on MIN_CONNECTIONS being 2
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_NAME(C), {"localhost", 8080}, 1000),
         ok = gunner_pool:free(?POOL_NAME(C), Connection, 1000)
@@ -429,7 +429,7 @@ stop_mock_server() ->
 %%
 
 wait_pool_cleanup() ->
-    _ = timer:sleep(?H_CLEAN_TIMEOUT).
+    _ = timer:sleep(?H_CLEANUP_TIMEOUT).
 
 get_counters(PoolID) ->
     PoolStats = get_pool_stats(PoolID),

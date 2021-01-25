@@ -27,9 +27,9 @@
 
 -export([pool_resizing_test/1]).
 
--define(POOL_CLEANUP_INTERVAL, 1000).
+-define(POOL_CLEANUP_INTERVAL, 100).
 -define(POOL_MAX_CONNECTION_LOAD, 1).
--define(POOL_MAX_CONNECTION_IDLE_AGE, 5).
+-define(POOL_MAX_CONNECTION_IDLE_AGE, 1).
 -define(POOL_MAX_SIZE, 25).
 -define(POOL_MIN_SIZE, 5).
 
@@ -37,6 +37,8 @@
 -define(POOL_NAME(C), proplists:get_value(?POOL_NAME_PROP, C)).
 
 -define(COWBOY_HANDLER_MAX_SLEEP_DURATION, 1000).
+
+-define(H_CLEANUP_TIMEOUT, (?POOL_CLEANUP_INTERVAL * ?POOL_MAX_CONNECTION_IDLE_AGE) + ?POOL_CLEANUP_INTERVAL).
 
 -define(GUNNER_REF(ConnectionPid, StreamRef), {gunner_ref, ConnectionPid, StreamRef}).
 
@@ -190,7 +192,7 @@ pool_resizing_test(C) ->
     ),
     ?assertMatch({ok, #{total_connections := ?POOL_MAX_SIZE}}, gunner:pool_status(?POOL_NAME(C))),
     _ = timer:sleep(
-        (?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2) + (?POOL_CLEANUP_INTERVAL * (?POOL_MAX_CONNECTION_IDLE_AGE))
+        (?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2) + ?H_CLEANUP_TIMEOUT
     ),
     ?assertMatch({ok, #{total_connections := ?POOL_MIN_SIZE}}, gunner:pool_status(?POOL_NAME(C))).
 

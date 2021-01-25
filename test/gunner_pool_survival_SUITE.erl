@@ -17,6 +17,7 @@
 -type test_return() :: _ | no_return().
 
 -export([normal_client/1]).
+-export([normal_locking_client/1]).
 -export([misinformed_client/1]).
 -export([confused_client/1]).
 
@@ -43,8 +44,8 @@ all() ->
 -spec groups() -> [{group_name(), list(), [test_case_name()]}].
 groups() ->
     [
-        {survival, [parallel, shuffle], create_group(500)},
-        {survival_locking, [parallel, shuffle], create_group(500)}
+        {survival, [parallel, shuffle], create_group(survival, 500)},
+        {survival_locking, [parallel, shuffle], create_group(survival_locking, 500)}
     ].
 
 -spec init_per_suite(config()) -> config().
@@ -103,12 +104,21 @@ init_per_testcase(_Name, C) ->
 end_per_testcase(_Name, _C) ->
     ok.
 
-create_group(TotalTests) ->
-    Spec = [
+get_group_spec(survival) ->
+    [
         {normal_client, 0.8},
         {misinformed_client, 0.1},
         {confused_client, 0.1}
-    ],
+    ];
+get_group_spec(survival_locking) ->
+    [
+        {normal_locking_client, 0.8},
+        {misinformed_client, 0.1},
+        {confused_client, 0.1}
+    ].
+
+create_group(GroupName, TotalTests) ->
+    Spec = get_group_spec(GroupName),
     make_testcase_list(Spec, TotalTests, []).
 
 make_testcase_list([], _TotalTests, Acc) ->
@@ -122,16 +132,20 @@ make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case
-        get(
-            ?POOL_NAME(C),
-            valid_host(),
-            <<"/", Tag/binary>>,
-            ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2
-        )
-    of
-        {ok, <<"ok/", Tag/binary>>} ->
-            ok;
+    case gunner:get(?POOL_NAME(C), valid_host(), <<"/", Tag/binary>>, 1000) of
+        {ok, PoolRef} ->
+            {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2);
+        {error, pool_unavailable} ->
+            ok
+    end.
+
+-spec normal_locking_client(config()) -> test_return().
+normal_locking_client(C) ->
+    Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
+    case gunner:get(?POOL_NAME(C), valid_host(), <<"/", Tag/binary>>, 1000) of
+        {ok, PoolRef} ->
+            {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
+            ok = gunner:free(?POOL_NAME(C), PoolRef);
         {error, pool_unavailable} ->
             ok
     end.
@@ -185,27 +199,21 @@ stop_mock_server() ->
 
 %%
 
-get(PoolID, ConnectionArgs, Path, Timeout) ->
+await(PoolRef, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    case gunner:get(PoolID, ConnectionArgs, Path, Timeout) of
-        {ok, PoolRef} ->
-            TimeoutLeft1 = Deadline - erlang:monotonic_time(millisecond),
-            case gunner:await(PoolRef, TimeoutLeft1) of
-                {response, nofin, 200, _Headers} ->
-                    TimeoutLeft2 = Deadline - erlang:monotonic_time(millisecond),
-                    case gunner:await_body(PoolRef, TimeoutLeft2) of
-                        {ok, Response, _Trailers} ->
-                            {ok, Response};
-                        {ok, Response} ->
-                            {ok, Response};
-                        {error, Reason} ->
-                            {error, {unknown, Reason}}
-                    end;
-                {response, fin, 404, _Headers} ->
-                    {error, notfound};
+    case gunner:await(PoolRef, Timeout) of
+        {response, nofin, 200, _Headers} ->
+            TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
+            case gunner:await_body(PoolRef, TimeoutLeft) of
+                {ok, Response, _Trailers} ->
+                    {ok, Response};
+                {ok, Response} ->
+                    {ok, Response};
                 {error, Reason} ->
                     {error, {unknown, Reason}}
             end;
-        {error, _Reason} = Error ->
-            Error
+        {response, fin, 404, _Headers} ->
+            {error, notfound};
+        {error, Reason} ->
+            {error, {unknown, Reason}}
     end.
