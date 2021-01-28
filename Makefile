@@ -69,4 +69,7 @@ test: submodules
 	$(REBAR) do eunit, ct
 
 bench:
-	$(REBAR) as test bench -m bench_gunner -n 1000
+	$(REBAR) as test bench -m bench_gunner
+	erl -pa _build/test/lib/*/ebin _build/test/lib/gunner/test -noshell \
+		-s benchmark_memory_pressure run \
+		-s erlang halt

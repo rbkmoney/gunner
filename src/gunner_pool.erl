@@ -120,7 +120,7 @@
 
 -type connection_state() :: #connection_state{}.
 
--type connection_status() :: down | {starting, requester()} | {up, unlocked | {locked, Owner :: pid()}} | inactive.
+-type connection_status() :: {starting, requester()} | {up, unlocked | {locked, Owner :: pid()}}.
 -type connection_idx() :: gunner_idx_authority:idx().
 
 -type connection_args() :: gunner:connection_args().
@@ -537,8 +537,6 @@ handle_connection_down(ConnectionPid, Mref, Reason, State) ->
             State1 = remove_connection_from_client_state(ConnectionPid, ClientPid, State),
             State2 = free_connection_idx(Idx, State1),
             {ok, remove_connection_state(ConnectionPid, dec_pool_size(State2))};
-        {ok, #connection_state{status = inactive, mref = Mref}} ->
-            {ok, remove_connection_state(ConnectionPid, State)};
         _ ->
             {error, invalid_connection_state}
     end.
@@ -600,9 +598,11 @@ process_connection_cleanup(Pid, SizeBudget, State) ->
         #connection_state{status = {up, _}, idle_count = IdleCount, idx = Idx} when
             IdleCount >= MaxAge, ConnLoad =:= 0, SizeBudget > 0
         ->
-            NewConnectionSt = ConnSt#connection_state{status = inactive},
+            %% Remove connection from pool
             State1 = free_connection_idx(Idx, State),
-            {SizeBudget - 1, set_connection_state(Pid, NewConnectionSt, dec_pool_size(State1))};
+            true = erlang:demonitor(ConnSt#connection_state.mref),
+            ok = close_gun_connection(Pid),
+            {SizeBudget - 1, remove_connection_state(Pid, dec_pool_size(State1))};
         #connection_state{status = {up, _}, idle_count = IdleCount} when
             IdleCount >= MaxAge, ConnLoad =:= 0, SizeBudget =< 0
         ->
@@ -611,10 +611,6 @@ process_connection_cleanup(Pid, SizeBudget, State) ->
         #connection_state{status = {up, _}} when ConnLoad > 0 ->
             NewConnectionSt = ConnSt#connection_state{idle_count = 0},
             {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
-        #connection_state{status = inactive} ->
-            %% 'DOWN' will do everything else
-            ok = close_gun_connection(Pid),
-            {SizeBudget, State};
         #connection_state{} ->
             {SizeBudget, State}
     end.
