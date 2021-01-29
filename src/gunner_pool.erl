@@ -438,7 +438,6 @@ handle_connection_creation(GroupID, ConnectionArgs, Requester, State) ->
             case open_gun_connection(ConnectionArgs, Idx, State) of
                 {ok, Pid, Mref} ->
                     ConnectionState = new_connection_state(Requester, GroupID, Idx, Pid, Mref),
-                    %_ = ct:pal("Created connection ~p, state:  ~p", [ConnectionState, State]),
                     {ok, set_connection_state(Pid, ConnectionState, inc_starting_count(State1))};
                 {error, Reason} ->
                     {error, {failed_to_start_connection, Reason}}
@@ -549,7 +548,6 @@ process_connection_removal(
     Reason,
     State
 ) ->
-    %_ = ct:pal("Removing starting connection ~p with reason ~p", [ConnectionPid, Reason]),
     ok = reply_to_requester({error, {connection_failed, map_down_reason(Reason)}}, Requester),
     State1 = free_connection_idx(Idx, State),
     remove_connection_state(ConnectionPid, dec_starting_count(State1));
@@ -558,7 +556,6 @@ process_connection_removal(
     _Reason,
     State
 ) ->
-    %_ = ct:pal("Removing unlocked connection ~p with reason ~p", [ConnectionPid, Reason]),
     State1 = free_connection_idx(Idx, State),
     remove_connection_state(ConnectionPid, dec_active_count(State1));
 process_connection_removal(
@@ -566,7 +563,6 @@ process_connection_removal(
     _Reason,
     State
 ) ->
-    %_ = ct:pal("Removing locked connection ~p with reason ~p", [ConnectionPid, Reason]),
     State1 = remove_connection_from_client_state(ConnectionPid, ClientPid, State),
     State2 = free_connection_idx(Idx, State1),
     remove_connection_state(ConnectionPid, dec_active_count(State2)).
@@ -602,10 +598,7 @@ handle_cleanup(State) ->
     %% TODO we need the total up connections here, excluding started ones
     case get_cleanup_size_budget(State) of
         SizeBudget when SizeBudget > 0 ->
-            %_ = ct:pal("Cleanup started, size: ~p, max: ~p", [State#state.active_count + State#state.starting_count, State#state.min_size]),
-            {ok, State1} = cleanup_connections(SizeBudget, State),
-            %_ = ct:pal("Cleanup done, size: ~p", [State#state.active_count + State#state.starting_count]),
-            {ok, State1};
+            cleanup_connections(SizeBudget, State);
         _SizeBudget ->
             {ok, State}
     end.
