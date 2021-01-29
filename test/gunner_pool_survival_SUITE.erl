@@ -21,8 +21,8 @@
 -export([misinformed_client/1]).
 -export([confused_client/1]).
 
--define(POOL_NAME_PROP, pool_name).
--define(POOL_NAME(C), proplists:get_value(?POOL_NAME_PROP, C)).
+-define(POOL_ID_PROP, pool_id).
+-define(POOL_ID(C), proplists:get_value(?POOL_ID_PROP, C)).
 
 -define(POOL_CLEANUP_INTERVAL, 1000).
 -define(POOL_MAX_CONNECTION_LOAD, 1).
@@ -65,18 +65,16 @@ end_per_suite(C) ->
 
 -spec init_per_group(group_name(), config()) -> config().
 init_per_group(survival, C) ->
-    PoolName = {pool, erlang:unique_integer()},
-    ok = gunner:start_pool(PoolName, #{
+    {ok, Pid} = gunner:start_pool(#{
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
         max_connection_idle_age => ?POOL_MAX_CONNECTION_IDLE_AGE,
         max_size => ?POOL_MAX_SIZE,
         min_size => ?POOL_MIN_SIZE
     }),
-    C ++ [{?POOL_NAME_PROP, PoolName}];
+    C ++ [{?POOL_ID_PROP, Pid}];
 init_per_group(survival_locking, C) ->
-    PoolName = {pool, erlang:unique_integer()},
-    ok = gunner:start_pool(PoolName, #{
+    {ok, Pid} = gunner:start_pool(#{
         mode => locking,
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
@@ -84,13 +82,13 @@ init_per_group(survival_locking, C) ->
         max_size => ?POOL_MAX_SIZE,
         min_size => ?POOL_MIN_SIZE
     }),
-    C ++ [{?POOL_NAME_PROP, PoolName}];
+    C ++ [{?POOL_ID_PROP, Pid}];
 init_per_group(_, C) ->
     C.
 
 -spec end_per_group(group_name(), config()) -> _.
 end_per_group(TestGroupName, C) when TestGroupName =:= survival; TestGroupName =:= survival_locking ->
-    ok = gunner:stop_pool(?POOL_NAME(C));
+    ok = gunner:stop_pool(?POOL_ID(C));
 end_per_group(_, _C) ->
     ok.
 
@@ -132,7 +130,7 @@ make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case gunner:get(?POOL_NAME(C), valid_host(), <<"/", Tag/binary>>, 1000) of
+    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>, 1000) of
         {ok, PoolRef} ->
             {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2);
         {error, pool_unavailable} ->
@@ -142,17 +140,17 @@ normal_client(C) ->
 -spec normal_locking_client(config()) -> test_return().
 normal_locking_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case gunner:get(?POOL_NAME(C), valid_host(), <<"/", Tag/binary>>, 1000) of
+    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>, 1000) of
         {ok, PoolRef} ->
             {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
-            ok = gunner:free(?POOL_NAME(C), PoolRef);
+            _ = gunner:free(?POOL_ID(C), PoolRef);
         {error, pool_unavailable} ->
             ok
     end.
 
 -spec misinformed_client(config()) -> test_return().
 misinformed_client(C) ->
-    case gunner:get(?POOL_NAME(C), {"localhost", 8090}, <<"/">>, 1000) of
+    case gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>, 1000) of
         {error, {connection_failed, _}} ->
             ok;
         {error, pool_unavailable} ->
@@ -161,7 +159,7 @@ misinformed_client(C) ->
 
 -spec confused_client(config()) -> test_return().
 confused_client(C) ->
-    case gunner:get(?POOL_NAME(C), {"localghost", 8080}, <<"/">>, 1000) of
+    case gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>, 1000) of
         {error, {connection_failed, _}} ->
             ok;
         {error, pool_unavailable} ->

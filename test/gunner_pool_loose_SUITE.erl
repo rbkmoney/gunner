@@ -16,10 +16,6 @@
 -type config() :: [{atom(), term()}].
 -type test_return() :: _ | no_return().
 
--export([pool_lifetime_test/1]).
--export([pool_already_exists/1]).
--export([pool_not_found/1]).
-
 -export([basic_lifetime_ok_test/1]).
 -export([connection_failed_test/1]).
 -export([different_connections_from_same_group_test/1]).
@@ -29,34 +25,28 @@
 
 -define(POOL_CLEANUP_INTERVAL, 100).
 -define(POOL_MAX_CONNECTION_LOAD, 1).
--define(POOL_MAX_CONNECTION_IDLE_AGE, 1).
+-define(POOL_MAX_CONNECTION_IDLE_AGE, 200).
 -define(POOL_MAX_SIZE, 25).
 -define(POOL_MIN_SIZE, 5).
 
--define(POOL_NAME_PROP, pool_name).
--define(POOL_NAME(C), proplists:get_value(?POOL_NAME_PROP, C)).
+-define(POOL_ID_PROP, pool_id).
+-define(POOL_ID(C), proplists:get_value(?POOL_ID_PROP, C)).
 
 -define(COWBOY_HANDLER_MAX_SLEEP_DURATION, 1000).
 
--define(H_CLEANUP_TIMEOUT, (?POOL_CLEANUP_INTERVAL * ?POOL_MAX_CONNECTION_IDLE_AGE) + ?POOL_CLEANUP_INTERVAL).
+-define(H_CLEANUP_TIMEOUT, ?POOL_MAX_CONNECTION_IDLE_AGE + ?POOL_CLEANUP_INTERVAL * 2).
 
 -define(GUNNER_REF(ConnectionPid, StreamRef), {gunner_ref, ConnectionPid, StreamRef}).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
     [
-        {group, pool_management},
         {group, multipool_tests}
     ].
 
 -spec groups() -> [{group_name(), list(), [test_case_name()]}].
 groups() ->
     [
-        {pool_management, [], [
-            pool_lifetime_test,
-            pool_already_exists,
-            pool_not_found
-        ]},
         {multipool_tests, [parallel], [
             {group, single_pool_tests},
             {group, single_pool_tests},
@@ -91,27 +81,23 @@ end_per_suite(C) ->
 %%
 
 -spec init_per_group(group_name(), config()) -> config().
-init_per_group(TestGroupName, C) when TestGroupName =:= pool_management ->
-    PoolName = {pool, erlang:unique_integer()},
-    C ++ [{?POOL_NAME_PROP, PoolName}];
 init_per_group(TestGroupName, C) when
     TestGroupName =:= single_pool_tests; TestGroupName =:= multiple_pool_group_tests
 ->
-    PoolName = {pool, erlang:unique_integer()},
-    ok = gunner:start_pool(PoolName, #{
+    {ok, PoolPid} = gunner:start_pool(#{
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
         max_connection_idle_age => ?POOL_MAX_CONNECTION_IDLE_AGE,
         max_size => ?POOL_MAX_SIZE,
         min_size => ?POOL_MIN_SIZE
     }),
-    C ++ [{?POOL_NAME_PROP, PoolName}];
+    C ++ [{?POOL_ID_PROP, PoolPid}];
 init_per_group(_, C) ->
     C.
 
 -spec end_per_group(group_name(), config()) -> _.
 end_per_group(TestGroupName, C) when TestGroupName =:= single_pool_tests; TestGroupName =:= multiple_pool_group_tests ->
-    ok = gunner:stop_pool(?POOL_NAME(C));
+    ok = gunner:stop_pool(?POOL_ID(C));
 end_per_group(_, _C) ->
     ok.
 
@@ -127,30 +113,11 @@ end_per_testcase(_Name, _C) ->
 
 %%
 
--spec pool_lifetime_test(config()) -> test_return().
-pool_lifetime_test(C) ->
-    ?assertEqual(ok, gunner_pool:start_pool(?POOL_NAME(C), #{})),
-    ?assertMatch({ok, _}, gunner_pool:pool_status(?POOL_NAME(C), 1000)),
-    ?assertEqual(ok, gunner_pool:stop_pool(?POOL_NAME(C))).
-
--spec pool_already_exists(config()) -> test_return().
-pool_already_exists(C) ->
-    ?assertEqual(ok, gunner_pool:start_pool(?POOL_NAME(C), #{})),
-    ?assertEqual({error, already_exists}, gunner_pool:start_pool(?POOL_NAME(C), #{})),
-    ?assertEqual(ok, gunner_pool:stop_pool(?POOL_NAME(C))).
-
--spec pool_not_found(config()) -> test_return().
-pool_not_found(C) ->
-    ?assertEqual({error, pool_not_found}, gunner_pool:pool_status(?POOL_NAME(C), 1000)),
-    ?assertEqual({error, not_found}, gunner_pool:stop_pool(?POOL_NAME(C))).
-
-%%
-
 -spec basic_lifetime_ok_test(config()) -> test_return().
 basic_lifetime_ok_test(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
     {ok, <<"ok/", Tag/binary>>} = get(
-        ?POOL_NAME(C),
+        ?POOL_ID(C),
         valid_host(),
         <<"/", Tag/binary>>,
         ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2
@@ -158,30 +125,32 @@ basic_lifetime_ok_test(C) ->
 
 -spec connection_failed_test(config()) -> test_return().
 connection_failed_test(C) ->
-    ?assertMatch({error, {connection_failed, _}}, gunner:get(?POOL_NAME(C), {"localghost", 8080}, <<"/">>, 1000)),
-    ?assertMatch({error, {connection_failed, _}}, gunner:get(?POOL_NAME(C), {"localhost", 8090}, <<"/">>, 1000)).
+    {error, {connection_failed, Reason1}} = gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>, 1000),
+    ?assert(lists:member(Reason1, [{shutdown, nxdomain}, unknown])),
+    {error, {connection_failed, Reason2}} = gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>, 1000),
+    ?assert(lists:member(Reason2, [{shutdown, econnrefused}, unknown])).
 
 -spec different_connections_from_same_group_test(config()) -> test_return().
 different_connections_from_same_group_test(C) ->
     Host = valid_host(),
-    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_NAME(C), Host, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_ID(C), Host, <<"/">>, 1000),
     %% Because of how pool is implemented, there is no guarantee that (almost) simultaneous requests
     %% to small pools and same connection groups will actually get different connection processes
     _ = timer:sleep(100),
-    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_NAME(C), Host, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_ID(C), Host, <<"/">>, 1000),
     ?assertNotEqual(ConnectionPid1, ConnectionPid2).
 
 -spec different_connections_from_different_groups_test(config()) -> test_return().
 different_connections_from_different_groups_test(C) ->
-    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_NAME(C), {"localhost", 8080}, <<"/">>, 1000),
-    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_NAME(C), {"localhost", 8086}, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_ID(C), {"localhost", 8080}, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_ID(C), {"localhost", 8086}, <<"/">>, 1000),
     ?assertNotEqual(ConnectionPid1, ConnectionPid2).
 
 -spec pool_resizing_test(config()) -> test_return().
 pool_resizing_test(C) ->
     _ = lists:foreach(
         fun(_) ->
-            case gunner:get(?POOL_NAME(C), valid_host(), <<"/">>, 1000) of
+            case gunner:get(?POOL_ID(C), valid_host(), <<"/">>, 1000) of
                 {ok, _} ->
                     ok;
                 {error, pool_unavailable} ->
@@ -190,11 +159,11 @@ pool_resizing_test(C) ->
         end,
         lists:seq(0, ?POOL_MAX_SIZE * 2)
     ),
-    ?assertMatch({ok, #{total_connections := ?POOL_MAX_SIZE}}, gunner:pool_status(?POOL_NAME(C))),
+    ?assertMatch({ok, #{total_connections := ?POOL_MAX_SIZE}}, gunner:pool_status(?POOL_ID(C))),
     _ = timer:sleep(
         (?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2) + ?H_CLEANUP_TIMEOUT
     ),
-    ?assertMatch({ok, #{total_connections := ?POOL_MIN_SIZE}}, gunner:pool_status(?POOL_NAME(C))).
+    ?assertMatch({ok, #{total_connections := ?POOL_MIN_SIZE}}, gunner:pool_status(?POOL_ID(C))).
 
 %%
 

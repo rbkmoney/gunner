@@ -7,12 +7,12 @@ run() ->
     Opts = #{iterations => 100},
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
-    ok = gunner:start_pool(default, #{
+    {ok, Pid} = gunner:start_pool(#{
         mode => locking
     }),
-    _ = run(gunner, mk_gunner_runner(), Opts),
+    _ = run(gunner, mk_gunner_runner(Pid), Opts),
     _ = run(gun, mk_gun_runner(), Opts),
-    ok = gunner:stop_pool(default),
+    ok = gunner:stop_pool(Pid),
     _ = stop_mock_server(),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
@@ -52,12 +52,12 @@ run(Name, Runner, Opts) ->
     _ = io:format("====================================~n~n", []),
     ok.
 
--spec mk_gunner_runner() -> meter_memory_pressure:runner().
-mk_gunner_runner() ->
+-spec mk_gunner_runner(pid()) -> meter_memory_pressure:runner().
+mk_gunner_runner(PoolID) ->
     fun() ->
-        case gunner_pool:acquire(default, {"localhost", 8080}, 1000) of
+        case gunner_pool:acquire(PoolID, {"localhost", 8080}, 1000) of
             {ok, Connection} ->
-                ok = gunner_pool:free(default, Connection, 1000);
+                ok = gunner_pool:free(PoolID, Connection, 1000);
             {error, pool_unavailable} ->
                 ok
         end

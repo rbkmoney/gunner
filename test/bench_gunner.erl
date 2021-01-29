@@ -7,28 +7,31 @@
     bench_gunner_pool_locking/2
 ]).
 
+-define(POOL_ID_PROP, pool_id).
+-define(POOL_ID(St), proplists:get_value(?POOL_ID_PROP, St)).
+
 %%
 
 -spec gunner_pool_loose(_) -> _.
 gunner_pool_loose(init) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
-    ok = gunner:start_pool(default, #{
+    {ok, Pid} = gunner:start_pool(#{
         max_size => 1000
     }),
-    [{apps, [App || {ok, App} <- Apps]}];
-gunner_pool_loose({input, _State}) ->
-    valid_host();
+    [{?POOL_ID_PROP, Pid}, {apps, [App || {ok, App} <- Apps]}];
+gunner_pool_loose({input, State}) ->
+    {?POOL_ID(State), valid_host()};
 gunner_pool_loose({stop, State}) ->
-    ok = gunner:stop_pool(default),
+    ok = gunner:stop_pool(?POOL_ID(State)),
     _ = stop_mock_server(),
     Apps = proplists:get_value(apps, State),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
 
 -spec bench_gunner_pool_loose(_, _) -> _.
-bench_gunner_pool_loose(Destination, _) ->
-    {ok, _} = gunner:get(default, Destination, <<"/">>, 1000).
+bench_gunner_pool_loose({PoolID, Destination}, _) ->
+    {ok, _} = gunner:get(PoolID, Destination, <<"/">>, 1000).
 
 %%
 
@@ -36,24 +39,24 @@ bench_gunner_pool_loose(Destination, _) ->
 gunner_pool_locking(init) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
-    ok = gunner:start_pool(default, #{
+    {ok, Pid} = gunner:start_pool(#{
         mode => locking,
         max_size => 1000
     }),
-    [{apps, [App || {ok, App} <- Apps]}];
-gunner_pool_locking({input, _State}) ->
-    valid_host();
+    [{?POOL_ID_PROP, Pid}, {apps, [App || {ok, App} <- Apps]}];
+gunner_pool_locking({input, State}) ->
+    {?POOL_ID(State), valid_host()};
 gunner_pool_locking({stop, State}) ->
-    ok = gunner:stop_pool(default),
+    ok = gunner:stop_pool(?POOL_ID(State)),
     _ = stop_mock_server(),
     Apps = proplists:get_value(apps, State),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
     ok.
 
 -spec bench_gunner_pool_locking(_, _) -> _.
-bench_gunner_pool_locking(Destination, _) ->
-    {ok, StreamRef} = gunner:get(default, Destination, <<"/">>, 1000),
-    _ = gunner:free(default, StreamRef, 1000).
+bench_gunner_pool_locking({PoolID, Destination}, _) ->
+    {ok, StreamRef} = gunner:get(PoolID, Destination, <<"/">>, 1000),
+    _ = gunner:free(PoolID, StreamRef, 1000).
 
 %%
 

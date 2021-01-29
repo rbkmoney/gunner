@@ -5,6 +5,7 @@
 
 %% API functions
 
+-export([start_pool/1]).
 -export([start_pool/2]).
 -export([stop_pool/1]).
 
@@ -20,7 +21,6 @@
 -export([post/6]).
 -export([post/7]).
 
--export([request/6]).
 -export([request/7]).
 -export([request/8]).
 
@@ -56,6 +56,8 @@
 %% Internal types
 
 -type pool_id() :: gunner_pool:pool_id().
+-type pool_pid() :: gunner_pool:pool_pid().
+-type pool_reg_name() :: gunner_pool:pool_reg_name().
 -type pool_opts() :: gunner_pool:pool_opts().
 
 -type conn_host() :: inet:hostname() | inet:ip_address().
@@ -97,18 +99,21 @@
 
 %%
 
--define(DEFAULT_POOL, default).
 -define(DEFAULT_TIMEOUT, 1000).
 
 %%
 %% API functions
 %%
 
--spec start_pool(pool_id(), pool_opts()) -> ok | {error, already_exists}.
+-spec start_pool(pool_opts()) -> {ok, gunner_pool:pool_pid()} | {error, already_exists}.
+start_pool(PoolOpts) ->
+    gunner_pool:start_pool(PoolOpts).
+
+-spec start_pool(pool_reg_name(), pool_opts()) -> {ok, gunner_pool:pool_pid()} | {error, already_exists}.
 start_pool(PoolID, PoolOpts) ->
     gunner_pool:start_pool(PoolID, PoolOpts).
 
--spec stop_pool(pool_id()) -> ok | {error, not_found}.
+-spec stop_pool(pool_pid()) -> ok | {error, not_found}.
 stop_pool(PoolID) ->
     gunner_pool:stop_pool(PoolID).
 
@@ -147,10 +152,6 @@ post(PoolID, ConnectionArgs, Path, Headers, Body, ReqOpts, Timeout) ->
 %%
 
 %%
-
--spec request(connection_args(), method(), path(), req_headers(), body(), req_opts()) -> request_return().
-request(ConnectionArgs, Method, Path, Headers, Body, ReqOpts) ->
-    request(?DEFAULT_POOL, ConnectionArgs, Method, Path, Headers, Body, ReqOpts).
 
 -spec request(pool_id(), connection_args(), method(), path(), req_headers(), body(), req_opts()) -> request_return().
 request(PoolID, ConnectionArgs, Method, Path, Headers, Body, ReqOpts) ->
