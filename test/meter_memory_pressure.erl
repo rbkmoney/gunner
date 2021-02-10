@@ -24,7 +24,8 @@
 -type opts() :: #{
     iterations => pos_integer(),
     spawn_opts => [{atom(), _}],
-    dump_traces => file:filename()
+    dump_traces => file:filename(),
+    target_process => pid()
 }.
 
 -export_type([runner/0]).
@@ -58,8 +59,9 @@ run(Runner, Tracer, Opts) ->
 
 run_staging(Runner, Tracer, Opts) ->
     N = maps:get(iterations, Opts),
+    Target = maps:get(target_process, Opts, self()),
     TraceOpts = [garbage_collection, timestamp, {tracer, Tracer}],
-    _ = erlang:trace(self(), true, TraceOpts),
+    _ = erlang:trace(Target, true, TraceOpts),
     iterate(Runner, N).
 
 iterate(Runner, N) when N > 0 ->

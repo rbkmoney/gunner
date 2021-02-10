@@ -150,7 +150,7 @@ failed_connection_test(C) ->
 connection_died_in_use(C) ->
     Counters = get_counters(?POOL_ID(C)),
     {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
-    ok = gun:close(Connection),
+    ok = proc_lib:stop(Connection, normal, 1000),
     ?assertEqual(
         {error, connection_not_found},
         gunner_pool:free(?POOL_ID(C), Connection, 1000)
@@ -163,7 +163,7 @@ connection_died_in_pool(C) ->
     {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
     ok = gunner_pool:free(?POOL_ID(C), Connection, 1000),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, free]),
-    ok = gun:close(Connection),
+    ok = proc_lib:stop(Connection, normal, 1000),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, free, free_down]).
 
 -spec connection_uniqueness_test(config()) -> test_return().

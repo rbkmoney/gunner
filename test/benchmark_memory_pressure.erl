@@ -10,8 +10,7 @@ run() ->
     {ok, Pid} = gunner:start_pool(#{
         mode => locking
     }),
-    _ = run(gunner, mk_gunner_runner(Pid), Opts),
-    _ = run(gun, mk_gun_runner(), Opts),
+    _ = run(gunner, mk_gunner_runner(Pid), Opts#{target_process => Pid}),
     ok = gunner:stop_pool(Pid),
     _ = stop_mock_server(),
     _ = lists:foreach(fun(App) -> application:stop(App) end, Apps),
@@ -60,22 +59,5 @@ mk_gunner_runner(PoolID) ->
                 ok = gunner_pool:free(PoolID, Connection, 1000);
             {error, pool_unavailable} ->
                 ok
-        end
-    end.
-
--spec mk_gun_runner() -> meter_memory_pressure:runner().
-mk_gun_runner() ->
-    fun() ->
-        case gun:open("localhost", 8080, #{retry => 0}) of
-            {ok, Client} ->
-                Timeout = 1000,
-                case gun:await_up(Client, Timeout) of
-                    {ok, _} ->
-                        ok;
-                    {error, Reason} ->
-                        {error, {unavailable, Reason}}
-                end;
-            {error, Reason = {options, _}} ->
-                erlang:error({invalid_client_options, Reason})
         end
     end.

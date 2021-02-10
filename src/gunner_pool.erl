@@ -117,13 +117,12 @@
     group_id :: group_id(),
     idx :: connection_idx(),
     pid :: connection_pid(),
-    mref :: mref(),
     idle_since = 0 :: integer()
 }).
 
 -type connection_state() :: #connection_state{}.
 
--type connection_status() :: {starting, requester()} | {up, unlocked | {locked, Owner :: pid()}}.
+-type connection_status() :: {starting, requester()} | {up | down, unlocked | {locked, Owner :: pid()}}.
 -type connection_idx() :: gunner_idx_authority:idx().
 
 -type connection_args() :: gunner:connection_args().
@@ -160,7 +159,8 @@
 
 -define(GUN_UP(ConnectionPid), {gun_up, ConnectionPid, _Protocol}).
 -define(GUN_DOWN(ConnectionPid, Reason), {gun_down, ConnectionPid, _Protocol, Reason, _KilledStreams}).
--define(DOWN(Mref, ConnectionPid, Reason), {'DOWN', Mref, process, ConnectionPid, Reason}).
+-define(DOWN(Mref, Pid, Reason), {'DOWN', Mref, process, Pid, Reason}).
+-define(EXIT(Pid, Reason), {'EXIT', Pid, Reason}).
 
 -define(GUNNER_CLEANUP(), {gunner_cleanup}).
 
@@ -232,6 +232,7 @@ call_pool(PoolRef, Args, Timeout) ->
 -spec init(list()) -> {ok, state()}.
 init([PoolOpts]) ->
     State = new_state(PoolOpts),
+    _ = erlang:process_flag(trap_exit, true),
     _ = erlang:send_after(State#state.cleanup_interval, self(), ?GUNNER_CLEANUP()),
     {ok, State}.
 
@@ -279,8 +280,11 @@ handle_info(?GUN_UP(ConnectionPid), State) ->
     {noreply, State1};
 handle_info(?GUN_DOWN(_ConnectionPid, _Reason), State) ->
     {noreply, State};
-handle_info(?DOWN(Mref, ProcessPid, Reason), State) ->
-    {ok, State1} = handle_process_down(ProcessPid, Mref, Reason, State),
+handle_info(?DOWN(Mref, ClientPid, Reason), State) ->
+    {ok, State1} = handle_client_down(ClientPid, Mref, Reason, State),
+    {noreply, State1};
+handle_info(?EXIT(ConnectionPid, Reason), State) ->
+    {ok, State1} = handle_connection_down(ConnectionPid, Reason, State),
     {noreply, State1};
 handle_info(_, _St0) ->
     erlang:error(unexpected_info).
@@ -333,33 +337,33 @@ create_group_id(ConnectionArgs) ->
 
 -spec acquire_connection_from_group(group_id(), state()) -> {connection, connection_pid(), state()} | no_connection.
 acquire_connection_from_group(GroupID, State) ->
-    % @TODO Randomize iterator?
     case find_suitable_connection(GroupID, State) of
-        {ok, ConnectionPid} ->
-            {ok, ConnectionSt} = get_connection_state(ConnectionPid, State),
-            ConnectionSt1 = reset_connection_idle(ConnectionSt),
-            {connection, ConnectionPid, set_connection_state(ConnectionPid, ConnectionSt1, State)};
+        {ok, ConnState} ->
+            ConnPid = ConnState#connection_state.pid,
+            ConnState1 = reset_connection_idle(ConnState),
+            {connection, ConnPid, set_connection_state(ConnPid, ConnState1, State)};
         {error, no_connection} ->
             no_connection
     end.
 
--spec find_suitable_connection(group_id(), state()) -> {ok, connection_pid()} | {error, no_connection}.
+-spec find_suitable_connection(group_id(), state()) -> {ok, connection_state()} | {error, no_connection}.
 find_suitable_connection(GroupID, State) ->
+    % @TODO Randomize iteration order somehow?
     Iter = maps:iterator(State#state.connections),
     find_suitable_connection(maps:next(Iter), GroupID, State).
 
 -type conn_it() :: maps:iterator(connection_pid(), connection_state()).
 -type next_conn() :: {connection_pid(), connection_state(), conn_it()} | none.
 
--spec find_suitable_connection(next_conn(), group_id(), state()) -> {ok, connection_pid()} | {error, no_connection}.
+-spec find_suitable_connection(next_conn(), group_id(), state()) -> {ok, connection_state()} | {error, no_connection}.
 find_suitable_connection(none, _GroupID, _State) ->
     {error, no_connection};
-find_suitable_connection({ConnPid, ConnState, Iter}, GroupID, State) ->
+find_suitable_connection({_ConnPid, ConnState, Iter}, GroupID, State) ->
     case ConnState of
         #connection_state{status = {up, unlocked}, group_id = GroupID, idx = Idx} ->
             case is_connection_available(Idx, State) of
                 true ->
-                    {ok, ConnPid};
+                    {ok, ConnState};
                 false ->
                     find_suitable_connection(maps:next(Iter), GroupID, State)
             end;
@@ -436,8 +440,8 @@ handle_connection_creation(GroupID, ConnectionArgs, Requester, State) ->
         true ->
             {Idx, State1} = new_connection_idx(State),
             case open_gun_connection(ConnectionArgs, Idx, State) of
-                {ok, Pid, Mref} ->
-                    ConnectionState = new_connection_state(Requester, GroupID, Idx, Pid, Mref),
+                {ok, Pid} ->
+                    ConnectionState = new_connection_state(Requester, GroupID, Idx, Pid),
                     {ok, set_connection_state(Pid, ConnectionState, inc_starting_count(State1))};
                 {error, Reason} ->
                     {error, {failed_to_start_connection, Reason}}
@@ -454,29 +458,22 @@ is_pool_available(State) ->
 get_total_limit(State) ->
     State#state.max_size.
 
--spec new_connection_state(requester(), group_id(), connection_idx(), connection_pid(), mref()) -> connection_state().
-new_connection_state(Requester, GroupID, Idx, Pid, Mref) ->
+-spec new_connection_state(requester(), group_id(), connection_idx(), connection_pid()) -> connection_state().
+new_connection_state(Requester, GroupID, Idx, Pid) ->
     #connection_state{
         status = {starting, Requester},
         group_id = GroupID,
         idx = Idx,
-        pid = Pid,
-        mref = Mref
+        pid = Pid
     }.
 
 %%
 
 -spec open_gun_connection(connection_args(), connection_idx(), state()) ->
-    {ok, connection_pid(), mref()} | {error, Reason :: _}.
+    {ok, connection_pid()} | {error, Reason :: _}.
 open_gun_connection({Host, Port}, Idx, State) ->
     Opts = get_gun_opts(Idx, State),
-    case gun:open(Host, Port, Opts) of
-        {ok, Connection} ->
-            Mref = erlang:monitor(process, Connection),
-            {ok, Connection, Mref};
-        {error, _Reason} = Error ->
-            Error
-    end.
+    gun:open(Host, Port, Opts).
 
 -spec get_gun_opts(connection_idx(), state()) -> gun:opts().
 get_gun_opts(Idx, State) ->
@@ -484,6 +481,7 @@ get_gun_opts(Idx, State) ->
     EventHandler = maps:with([event_handler], Opts),
     Opts#{
         retry => 0,
+        supervise => false,
         %% Setup event handler and optionally pass through a custom one
         event_handler =>
             {gunner_gun_event_handler, EventHandler#{
@@ -495,7 +493,7 @@ get_gun_opts(Idx, State) ->
 
 -spec close_gun_connection(connection_pid()) -> ok.
 close_gun_connection(ConnectionPid) ->
-    ok = gun:close(ConnectionPid).
+    ok = gun:shutdown(ConnectionPid).
 
 %%
 
@@ -519,61 +517,37 @@ reply_to_requester(Message, Requester) ->
 
 %%
 
--spec handle_process_down(pid(), mref(), Reason :: _, state()) -> {ok, state()}.
-handle_process_down(ProcessPid, Mref, Reason, State) ->
-    case is_connection_process(ProcessPid, State) of
-        true ->
-            handle_connection_down(ProcessPid, Mref, Reason, State);
-        false ->
-            handle_client_down(ProcessPid, Mref, Reason, State)
-    end.
-
--spec is_connection_process(pid(), state()) -> boolean().
-is_connection_process(ProcessPid, State) ->
-    maps:is_key(ProcessPid, State#state.connections).
-
--spec handle_connection_down(connection_pid(), mref(), Reason :: _, state()) ->
-    {ok, state()} | {error, no_connection_state}.
-handle_connection_down(ConnectionPid, Mref, Reason, State) ->
+-spec handle_connection_down(connection_pid(), Reason :: _, state()) -> {ok, state()} | {error, no_connection_state}.
+handle_connection_down(ConnectionPid, Reason, State) ->
     case get_connection_state(ConnectionPid, State) of
-        {ok, ConnSt = #connection_state{mref = Mref}} ->
+        {ok, ConnSt} ->
             {ok, process_connection_removal(ConnSt, Reason, State)};
         _ ->
             {error, no_connection_state}
     end.
 
 -spec process_connection_removal(connection_state(), Reason :: _, state()) -> state().
-process_connection_removal(
-    #connection_state{status = {starting, Requester}, pid = ConnectionPid, idx = Idx},
-    Reason,
-    State
-) ->
-    ok = reply_to_requester({error, {connection_failed, map_down_reason(Reason)}}, Requester),
-    State1 = free_connection_idx(Idx, State),
-    remove_connection_state(ConnectionPid, dec_starting_count(State1));
-process_connection_removal(
-    #connection_state{status = {up, unlocked}, pid = ConnectionPid, idx = Idx},
-    _Reason,
-    State
-) ->
-    State1 = free_connection_idx(Idx, State),
-    remove_connection_state(ConnectionPid, dec_active_count(State1));
-process_connection_removal(
-    #connection_state{status = {up, {locked, ClientPid}}, pid = ConnectionPid, idx = Idx},
-    _Reason,
-    State
-) ->
-    State1 = remove_connection_from_client_state(ConnectionPid, ClientPid, State),
-    State2 = free_connection_idx(Idx, State1),
-    remove_connection_state(ConnectionPid, dec_active_count(State2)).
+process_connection_removal(ConnState = #connection_state{status = {starting, Requester}}, Reason, State) ->
+    ok = reply_to_requester({error, {connection_failed, Reason}}, Requester),
+    State1 = free_connection_idx(ConnState#connection_state.idx, State),
+    remove_connection(ConnState, dec_starting_count(State1));
+process_connection_removal(ConnState = #connection_state{status = {up, _}}, _Reason, State) ->
+    remove_up_connection(ConnState, State);
+process_connection_removal(ConnState = #connection_state{status = {down, _}}, _Reason, State) ->
+    remove_down_connection(ConnState, State).
 
-map_down_reason(noproc) ->
-    %% Connection could've died even before we put a monitor on it
-    %% Because of this, we have no idea what happened
-    %% @TODO Consider using the event handler for "soft" failures
-    unknown;
-map_down_reason(Reason) ->
-    Reason.
+remove_up_connection(ConnState = #connection_state{idx = ConnIdx}, State) ->
+    State1 = free_connection_idx(ConnIdx, State),
+    remove_down_connection(ConnState, dec_active_count(State1)).
+
+remove_down_connection(ConnState = #connection_state{status = {_, unlocked}}, State) ->
+    remove_connection(ConnState, State);
+remove_down_connection(ConnState = #connection_state{status = {_, {locked, ClientPid}}}, State) ->
+    State1 = remove_connection_from_client_state(ConnState#connection_state.pid, ClientPid, State),
+    remove_connection(ConnState, State1).
+
+remove_connection(#connection_state{pid = ConnPid}, State) ->
+    remove_connection_state(ConnPid, State).
 
 -spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> {ok, state()} | {error, invalid_client_state}.
 handle_client_down(ClientPid, Mref, _Reason, State) ->
@@ -624,13 +598,14 @@ process_connection_cleanup(Pid, ConnSt, SizeBudget, State) ->
     CurrentTime = erlang:monotonic_time(millisecond),
     ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
     case ConnSt of
-        #connection_state{status = {up, _}, idle_since = IdleSince} when
+        #connection_state{status = {up, Locking}, idle_since = IdleSince, idx = ConnIdx} when
             IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0, SizeBudget > 0
         ->
-            %% Remove connection from pool
-            true = erlang:demonitor(ConnSt#connection_state.mref, [flush]),
+            %% Close connection, 'EXIT' msg will remove it from state
             ok = close_gun_connection(Pid),
-            {SizeBudget - 1, process_connection_removal(ConnSt, cleanup, State)};
+            State1 = free_connection_idx(ConnIdx, State),
+            NewConnectionSt = ConnSt#connection_state{status = {down, Locking}},
+            {SizeBudget - 1, set_connection_state(Pid, NewConnectionSt, dec_active_count(State1))};
         #connection_state{status = {up, _}, idle_since = IdleSince} when
             IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0, SizeBudget =< 0
         ->

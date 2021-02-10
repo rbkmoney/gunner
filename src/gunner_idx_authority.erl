@@ -9,7 +9,7 @@
 %% API Types
 
 -type idx() :: non_neg_integer().
--type t() :: queue:queue().
+-type t() :: list(integer()).
 
 -export_type([idx/0]).
 -export_type([t/0]).
@@ -24,17 +24,14 @@
 
 -spec new(size()) -> t().
 new(Size) ->
-    queue:from_list(lists:seq(1, Size)).
+    lists:seq(1, Size).
 
 -spec get_index(t()) -> {ok, idx(), t()} | {error, no_free_indices}.
-get_index(St) ->
-    case queue:out(St) of
-        {{value, Idx}, NewSt} ->
-            {ok, Idx, NewSt};
-        {empty, St} ->
-            {error, no_free_indices}
-    end.
+get_index([]) ->
+    {error, no_free_indices};
+get_index([Idx | Rest]) ->
+    {ok, Idx, Rest}.
 
 -spec free_index(idx(), t()) -> {ok, t()}.
 free_index(Idx, St) ->
-    {ok, queue:in(Idx, St)}.
+    {ok, [Idx | St]}.
