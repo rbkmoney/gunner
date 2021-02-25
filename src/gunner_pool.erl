@@ -114,6 +114,7 @@
 
 -record(connection_state, {
     status = down :: connection_status(),
+    lock = unlocked :: connection_lock(),
     group_id :: group_id(),
     idx :: connection_idx(),
     pid :: connection_pid(),
@@ -122,7 +123,8 @@
 
 -type connection_state() :: #connection_state{}.
 
--type connection_status() :: {starting, requester()} | {up | down, unlocked | {locked, Owner :: pid()}}.
+-type connection_status() :: {starting, requester()} | up | down.
+-type connection_lock() :: unlocked | {locked, Owner :: pid()}.
 -type connection_idx() :: gunner_idx_authority:idx().
 
 -type connection_args() :: gunner:connection_args().
@@ -360,7 +362,7 @@ find_suitable_connection(none, _GroupID, _State) ->
     {error, no_connection};
 find_suitable_connection({_ConnPid, ConnState, Iter}, GroupID, State) ->
     case ConnState of
-        #connection_state{status = {up, unlocked}, group_id = GroupID, idx = Idx} ->
+        #connection_state{status = up, lock = unlocked, group_id = GroupID, idx = Idx} ->
             case is_connection_available(Idx, State) of
                 true ->
                     {ok, ConnState};
@@ -389,7 +391,7 @@ handle_free_connection(_ConnectionPid, _From, #state{mode = loose}) ->
     {error, {invalid_pool_mode, loose}};
 handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mode = locking}) ->
     case get_connection_state(ConnectionPid, State) of
-        #connection_state{status = {up, {locked, ClientPid}}} = ConnSt ->
+        #connection_state{status = up, lock = {locked, ClientPid}} = ConnSt ->
             ConnSt1 = reset_connection_idle(ConnSt),
             State1 = set_connection_state(ConnectionPid, ConnSt1, State),
             {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
@@ -457,6 +459,7 @@ get_total_limit(State) ->
 new_connection_state(Requester, GroupID, Idx, Pid) ->
     #connection_state{
         status = {starting, Requester},
+        lock = unlocked,
         group_id = GroupID,
         idx = Idx,
         pid = Pid
@@ -496,7 +499,7 @@ close_gun_connection(ConnectionPid) ->
 handle_connection_started(ConnectionPid, State) ->
     #connection_state{status = {starting, {ClientPid, _} = Requester}} =
         ConnSt = get_connection_state(ConnectionPid, State),
-    ConnSt1 = ConnSt#connection_state{status = {up, unlocked}},
+    ConnSt1 = ConnSt#connection_state{status = up, lock = unlocked},
     ConnSt2 = reset_connection_idle(ConnSt1),
     ok = reply_to_requester({ok, ConnectionPid}, Requester),
     State1 = set_connection_state(ConnectionPid, ConnSt2, State),
@@ -523,18 +526,18 @@ process_connection_removal(ConnState = #connection_state{status = {starting, Req
     ok = reply_to_requester({error, {connection_failed, Reason}}, Requester),
     State1 = free_connection_idx(ConnState#connection_state.idx, State),
     remove_connection(ConnState, dec_starting_count(State1));
-process_connection_removal(ConnState = #connection_state{status = {up, _}}, _Reason, State) ->
+process_connection_removal(ConnState = #connection_state{status = up}, _Reason, State) ->
     remove_up_connection(ConnState, State);
-process_connection_removal(ConnState = #connection_state{status = {down, _}}, _Reason, State) ->
+process_connection_removal(ConnState = #connection_state{status = down}, _Reason, State) ->
     remove_down_connection(ConnState, State).
 
 remove_up_connection(ConnState = #connection_state{idx = ConnIdx}, State) ->
     State1 = free_connection_idx(ConnIdx, State),
     remove_down_connection(ConnState, dec_active_count(State1)).
 
-remove_down_connection(ConnState = #connection_state{status = {_, unlocked}}, State) ->
+remove_down_connection(ConnState = #connection_state{lock = unlocked}, State) ->
     remove_connection(ConnState, State);
-remove_down_connection(ConnState = #connection_state{status = {_, {locked, ClientPid}}}, State) ->
+remove_down_connection(ConnState = #connection_state{lock = {locked, ClientPid}}, State) ->
     State1 = remove_connection_from_client_state(ConnState#connection_state.pid, ClientPid, State),
     remove_connection(ConnState, State1).
 
@@ -586,26 +589,26 @@ process_connection_cleanup(Pid, ConnSt, SizeBudget, State) ->
     CurrentTime = erlang:monotonic_time(millisecond),
     ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
     case ConnSt of
-        #connection_state{status = {up, Locking}, idle_since = IdleSince, idx = ConnIdx} when
+        #connection_state{status = up, idle_since = IdleSince, idx = ConnIdx} when
             IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0, SizeBudget > 0
         ->
             %% Close connection, 'EXIT' msg will remove it from state
             ok = close_gun_connection(Pid),
             State1 = free_connection_idx(ConnIdx, State),
-            NewConnectionSt = ConnSt#connection_state{status = {down, Locking}},
+            NewConnectionSt = ConnSt#connection_state{status = down},
             {SizeBudget - 1, set_connection_state(Pid, NewConnectionSt, dec_active_count(State1))};
-        #connection_state{status = {up, _}, idle_since = IdleSince} when
+        #connection_state{status = up, idle_since = IdleSince} when
             IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0, SizeBudget =< 0
         ->
             %% Should remove connection, but no budget
             NewConnectionSt = reset_connection_idle(ConnSt),
             {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
-        #connection_state{status = {up, _}, idle_since = IdleSince} when
+        #connection_state{status = up, idle_since = IdleSince} when
             IdleSince + MaxAge > CurrentTime, ConnLoad =:= 0, SizeBudget > 0
         ->
             %% Connection has no load, but has not yet met time criteria for deletion
             {SizeBudget, State};
-        #connection_state{status = {up, _}} when ConnLoad > 0 ->
+        #connection_state{status = up} when ConnLoad > 0 ->
             %% Connection has load, reset idle timer
             NewConnectionSt = reset_connection_idle(ConnSt),
             {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
@@ -635,7 +638,7 @@ lock_connection(ConnectionPid, ClientPid, State) ->
 -spec do_lock_connection(connection_pid(), client_pid(), state()) -> state().
 do_lock_connection(ConnectionPid, ClientPid, State) ->
     ConnectionSt = get_connection_state(ConnectionPid, State),
-    ConnectionSt1 = ConnectionSt#connection_state{status = {up, {locked, ClientPid}}},
+    ConnectionSt1 = ConnectionSt#connection_state{status = up, lock = {locked, ClientPid}},
     set_connection_state(ConnectionPid, ConnectionSt1, State).
 
 -spec do_add_connection_to_client(connection_pid(), client_state()) -> client_state().
@@ -650,7 +653,7 @@ unlock_connection(ConnectionPid, ClientPid, State) ->
 -spec do_unlock_connection(connection_pid(), state()) -> state().
 do_unlock_connection(ConnectionPid, State) ->
     ConnectionSt = get_connection_state(ConnectionPid, State),
-    ConnectionSt1 = ConnectionSt#connection_state{status = {up, unlocked}},
+    ConnectionSt1 = ConnectionSt#connection_state{status = up, lock = unlocked},
     set_connection_state(ConnectionPid, ConnectionSt1, State).
 
 -spec remove_connection_from_client_state(connection_pid(), client_pid(), state()) -> state().
@@ -741,7 +744,7 @@ create_pool_status_response(State) ->
 get_available_connections_count(Connections) ->
     maps:fold(
         fun
-            (_K, #connection_state{status = {up, unlocked}}, Acc) -> Acc + 1;
+            (_K, #connection_state{status = up, lock = unlocked}, Acc) -> Acc + 1;
             (_K, #connection_state{}, Acc) -> Acc
         end,
         0,
