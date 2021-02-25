@@ -274,19 +274,19 @@ handle_cast(_Cast, St) ->
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info(?GUNNER_CLEANUP(), State) ->
-    {ok, State1} = handle_cleanup(State),
+    State1 = handle_cleanup(State),
     _ = erlang:send_after(State#state.cleanup_interval, self(), ?GUNNER_CLEANUP()),
     {noreply, State1};
 handle_info(?GUN_UP(ConnectionPid), State) ->
-    {ok, State1} = handle_connection_started(ConnectionPid, State),
+    State1 = handle_connection_started(ConnectionPid, State),
     {noreply, State1};
 handle_info(?GUN_DOWN(_ConnectionPid, _Reason), State) ->
     {noreply, State};
 handle_info(?DOWN(Mref, ClientPid, Reason), State) ->
-    {ok, State1} = handle_client_down(ClientPid, Mref, Reason, State),
+    State1 = handle_client_down(ClientPid, Mref, Reason, State),
     {noreply, State1};
 handle_info(?EXIT(ConnectionPid, Reason), State) ->
-    {ok, State1} = handle_connection_down(ConnectionPid, Reason, State),
+    State1 = handle_connection_down(ConnectionPid, Reason, State),
     {noreply, State1};
 handle_info(_, _St0) ->
     erlang:error(unexpected_info).
@@ -495,7 +495,7 @@ close_gun_connection(ConnectionPid) ->
 
 %%
 
--spec handle_connection_started(connection_pid(), state()) -> {ok, state()}.
+-spec handle_connection_started(connection_pid(), state()) -> state().
 handle_connection_started(ConnectionPid, State) ->
     #connection_state{status = {starting, {ClientPid, _} = Requester}} =
         ConnSt = get_connection_state(ConnectionPid, State),
@@ -504,7 +504,7 @@ handle_connection_started(ConnectionPid, State) ->
     ok = reply_to_requester({ok, ConnectionPid}, Requester),
     State1 = set_connection_state(ConnectionPid, ConnSt2, State),
     State2 = dec_starting_count(inc_active_count(State1)),
-    {ok, maybe_lock_connection(ConnectionPid, ClientPid, State2)}.
+    maybe_lock_connection(ConnectionPid, ClientPid, State2).
 
 reply_to_requester(Message, Requester) ->
     _ = gen_server:reply(Requester, Message),
@@ -512,14 +512,10 @@ reply_to_requester(Message, Requester) ->
 
 %%
 
--spec handle_connection_down(connection_pid(), Reason :: _, state()) -> {ok, state()} | {error, no_connection_state}.
+-spec handle_connection_down(connection_pid(), Reason :: _, state()) -> state().
 handle_connection_down(ConnectionPid, Reason, State) ->
-    case get_connection_state(ConnectionPid, State) of
-        #connection_state{} = ConnSt ->
-            {ok, process_connection_removal(ConnSt, Reason, State)};
-        undefined ->
-            {error, no_connection_state}
-    end.
+    ConnSt = get_connection_state(ConnectionPid, State),
+    process_connection_removal(ConnSt, Reason, State).
 
 -spec process_connection_removal(connection_state(), Reason :: _, state()) -> state().
 process_connection_removal(ConnState = #connection_state{status = {starting, Requester}}, Reason, State) ->
@@ -544,10 +540,10 @@ remove_down_connection(ConnState = #connection_state{lock = {locked, ClientPid}}
 remove_connection(#connection_state{pid = ConnPid}, State) ->
     remove_connection_state(ConnPid, State).
 
--spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> {ok, state()}.
+-spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> state().
 handle_client_down(ClientPid, Mref, _Reason, State) ->
     #client_state{mref = Mref, connections = Connections} = get_client_state(ClientPid, State),
-    {ok, unlock_client_connections(Connections, State)}.
+    unlock_client_connections(Connections, State).
 
 -spec unlock_client_connections([connection_pid()], state()) -> state().
 unlock_client_connections([], State) ->
@@ -558,33 +554,18 @@ unlock_client_connections([ConnectionPid | Rest], State) ->
 
 %%
 
--spec handle_cleanup(state()) -> {ok, state()}.
+-spec handle_cleanup(state()) -> state().
 handle_cleanup(State) ->
-    %% TODO we need the total up connections here, excluding started ones
-    case get_cleanup_size_budget(State) of
-        SizeBudget when SizeBudget > 0 ->
-            cleanup_connections(SizeBudget, State);
-        _SizeBudget ->
-            {ok, State}
-    end.
+    Iter = maps:iterator(State#state.connections),
+    process_connection_cleanup(maps:next(Iter), get_cleanup_size_budget(State), State).
 
 -spec get_cleanup_size_budget(state()) -> integer().
 get_cleanup_size_budget(State) ->
+    %% TODO we need the total up connections here, excluding started ones
     State#state.active_count - State#state.min_size.
 
--spec cleanup_connections(integer(), state()) -> {ok, state()}.
-cleanup_connections(Budget, State) ->
-    {_Budget, NewState} = maps:fold(
-        fun(ConnPid, ConnSt, {CurrentBudget, CurrentState}) ->
-            process_connection_cleanup(ConnPid, ConnSt, CurrentBudget, CurrentState)
-        end,
-        {Budget, State},
-        State#state.connections
-    ),
-    {ok, NewState}.
-
--spec process_connection_cleanup(connection_pid(), connection_state(), integer(), state()) -> {integer(), state()}.
-process_connection_cleanup(Pid, ConnSt, SizeBudget, State) ->
+-spec process_connection_cleanup(next_conn(), integer(), state()) -> state().
+process_connection_cleanup({Pid, ConnSt, Iter}, SizeBudget, State) when SizeBudget >= 0 ->
     MaxAge = State#state.max_connection_idle_age,
     CurrentTime = erlang:monotonic_time(millisecond),
     ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
@@ -596,25 +577,13 @@ process_connection_cleanup(Pid, ConnSt, SizeBudget, State) ->
             ok = close_gun_connection(Pid),
             State1 = free_connection_idx(ConnIdx, State),
             NewConnectionSt = ConnSt#connection_state{status = down},
-            {SizeBudget - 1, set_connection_state(Pid, NewConnectionSt, dec_active_count(State1))};
-        #connection_state{status = up, idle_since = IdleSince} when
-            IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0, SizeBudget =< 0
-        ->
-            %% Should remove connection, but no budget
-            NewConnectionSt = reset_connection_idle(ConnSt),
-            {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
-        #connection_state{status = up, idle_since = IdleSince} when
-            IdleSince + MaxAge > CurrentTime, ConnLoad =:= 0, SizeBudget > 0
-        ->
-            %% Connection has no load, but has not yet met time criteria for deletion
-            {SizeBudget, State};
-        #connection_state{status = up} when ConnLoad > 0 ->
-            %% Connection has load, reset idle timer
-            NewConnectionSt = reset_connection_idle(ConnSt),
-            {SizeBudget, set_connection_state(Pid, NewConnectionSt, State)};
+            State2 = set_connection_state(Pid, NewConnectionSt, dec_active_count(State1)),
+            process_connection_cleanup(maps:next(Iter), SizeBudget - 1, State2);
         #connection_state{} ->
-            {SizeBudget, State}
-    end.
+            process_connection_cleanup(maps:next(Iter), SizeBudget, State)
+    end;
+process_connection_cleanup(_NextConn, _SizeBudget, State) ->
+    State.
 
 -spec reset_connection_idle(connection_state()) -> connection_state().
 reset_connection_idle(ConnectionSt) ->
