@@ -411,7 +411,7 @@ set_connection_state(Pid, Connection, State) ->
 
 -spec remove_connection_state(connection_pid(), state()) -> state().
 remove_connection_state(Pid, State) ->
-    State#state{connections = maps:without([Pid], State#state.connections)}.
+    State#state{connections = maps:remove(Pid, State#state.connections)}.
 
 %%
 
@@ -702,7 +702,7 @@ set_client_state(Pid, ClientSt, State) ->
 
 -spec remove_client_state(client_pid(), state()) -> state().
 remove_client_state(Pid, State) ->
-    State#state{clients = maps:without([Pid], State#state.clients)}.
+    State#state{clients = maps:remove(Pid, State#state.clients)}.
 
 %%
 
