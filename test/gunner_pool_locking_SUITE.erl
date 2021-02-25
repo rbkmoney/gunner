@@ -202,7 +202,7 @@ cant_free_multiple_times(C) ->
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
         ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1, 1000)),
         ?assertEqual(
-            {error, invalid_connection_state},
+            {error, connection_not_locked},
             gunner_pool:free(?POOL_ID(C), Connection1, 1000)
         ),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, free])
@@ -225,14 +225,14 @@ strict_connection_ownership_test(C) ->
     ?assertNotEqual(Connection1, Connection2),
     ok = client_process_persistent(client1, fun() ->
         ?assertEqual(
-            {error, invalid_connection_state},
+            {error, connection_not_locked},
             gunner_pool:free(?POOL_ID(C), Connection2, 1000)
         ),
         {return, ok}
     end),
     ok = client_process_persistent(client2, fun() ->
         ?assertEqual(
-            {error, invalid_connection_state},
+            {error, connection_not_locked},
             gunner_pool:free(?POOL_ID(C), Connection1, 1000)
         ),
         {return, ok}

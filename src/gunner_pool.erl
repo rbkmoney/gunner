@@ -206,7 +206,7 @@ acquire(PoolID, ConnectionArgs, Timeout) ->
 
 -spec free(pool_id(), connection_pid(), timeout()) ->
     ok |
-    {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+    {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
 free(PoolID, ConnectionPid, Timeout) ->
     call_pool(PoolID, {free, ConnectionPid}, Timeout).
 
@@ -242,7 +242,7 @@ init([PoolOpts]) ->
         {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
             state()};
     ({free, connection_pid()}, from(), state()) ->
-        {reply, ok | {error, {invalid_pool_mode, loose} | invalid_connection_state}, state()};
+        {reply, ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}, state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
 handle_call({acquire, ConnectionArgs}, From, State) ->
@@ -384,7 +384,7 @@ get_connection_load(Idx, State) ->
 
 -spec handle_free_connection(connection_pid(), requester(), state()) -> {Result, state()} | Error when
     Result :: ok,
-    Error :: {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+    Error :: {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
 handle_free_connection(_ConnectionPid, _From, #state{mode = loose}) ->
     {error, {invalid_pool_mode, loose}};
 handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mode = locking}) ->
@@ -394,7 +394,7 @@ handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mod
             State1 = set_connection_state(ConnectionPid, ConnSt1, State),
             {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
         #connection_state{} ->
-            {error, invalid_connection_state};
+            {error, connection_not_locked};
         undefined ->
             {error, connection_not_found}
     end.
@@ -492,19 +492,16 @@ close_gun_connection(ConnectionPid) ->
 
 %%
 
--spec handle_connection_started(connection_pid(), state()) -> {ok, state()} | {error, invalid_connection_state}.
+-spec handle_connection_started(connection_pid(), state()) -> {ok, state()}.
 handle_connection_started(ConnectionPid, State) ->
-    case get_connection_state(ConnectionPid, State) of
-        #connection_state{status = {starting, {ClientPid, _} = Requester}} = ConnSt ->
-            ConnSt1 = ConnSt#connection_state{status = {up, unlocked}},
-            ConnSt2 = reset_connection_idle(ConnSt1),
-            ok = reply_to_requester({ok, ConnectionPid}, Requester),
-            State1 = set_connection_state(ConnectionPid, ConnSt2, State),
-            State2 = dec_starting_count(inc_active_count(State1)),
-            {ok, maybe_lock_connection(ConnectionPid, ClientPid, State2)};
-        _ ->
-            {error, invalid_connection_state}
-    end.
+    #connection_state{status = {starting, {ClientPid, _} = Requester}} =
+        ConnSt = get_connection_state(ConnectionPid, State),
+    ConnSt1 = ConnSt#connection_state{status = {up, unlocked}},
+    ConnSt2 = reset_connection_idle(ConnSt1),
+    ok = reply_to_requester({ok, ConnectionPid}, Requester),
+    State1 = set_connection_state(ConnectionPid, ConnSt2, State),
+    State2 = dec_starting_count(inc_active_count(State1)),
+    {ok, maybe_lock_connection(ConnectionPid, ClientPid, State2)}.
 
 reply_to_requester(Message, Requester) ->
     _ = gen_server:reply(Requester, Message),
@@ -544,14 +541,10 @@ remove_down_connection(ConnState = #connection_state{status = {_, {locked, Clien
 remove_connection(#connection_state{pid = ConnPid}, State) ->
     remove_connection_state(ConnPid, State).
 
--spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> {ok, state()} | {error, invalid_client_state}.
+-spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> {ok, state()}.
 handle_client_down(ClientPid, Mref, _Reason, State) ->
-    case get_client_state(ClientPid, State) of
-        #client_state{mref = Mref, connections = Connections} ->
-            {ok, unlock_client_connections(Connections, State)};
-        _ ->
-            {error, invalid_client_state}
-    end.
+    #client_state{mref = Mref, connections = Connections} = get_client_state(ClientPid, State),
+    {ok, unlock_client_connections(Connections, State)}.
 
 -spec unlock_client_connections([connection_pid()], state()) -> state().
 unlock_client_connections([], State) ->

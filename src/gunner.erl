@@ -171,12 +171,12 @@ request(PoolID, ConnectionArgs, Method, Path, Headers, Body, ReqOpts, Timeout) -
 %%
 
 -spec free(pool_id(), gunner_stream_ref()) ->
-    ok | {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+    ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
 free(PoolID, GStreamRef) ->
     free(PoolID, GStreamRef, ?DEFAULT_TIMEOUT).
 
 -spec free(pool_id(), gunner_stream_ref(), timeout()) ->
-    ok | {error, {invalid_pool_mode, loose} | invalid_connection_state | connection_not_found}.
+    ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
 free(PoolID, {gunner_ref, ConnectionPid, _}, Timeout) ->
     gunner_pool:free(PoolID, ConnectionPid, Timeout).
 
