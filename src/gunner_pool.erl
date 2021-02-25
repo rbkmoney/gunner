@@ -389,26 +389,21 @@ handle_free_connection(_ConnectionPid, _From, #state{mode = loose}) ->
     {error, {invalid_pool_mode, loose}};
 handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mode = locking}) ->
     case get_connection_state(ConnectionPid, State) of
-        {ok, #connection_state{status = {up, {locked, ClientPid}}} = ConnSt} ->
+        #connection_state{status = {up, {locked, ClientPid}}} = ConnSt ->
             ConnSt1 = reset_connection_idle(ConnSt),
             State1 = set_connection_state(ConnectionPid, ConnSt1, State),
             {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
-        {ok, #connection_state{}} ->
+        #connection_state{} ->
             {error, invalid_connection_state};
-        {error, no_state} ->
+        undefined ->
             {error, connection_not_found}
     end.
 
 %%
 
--spec get_connection_state(connection_pid(), state()) -> {ok, connection_state()} | {error, no_state}.
+-spec get_connection_state(connection_pid(), state()) -> connection_state() | undefined.
 get_connection_state(Pid, State) ->
-    case maps:get(Pid, State#state.connections, undefined) of
-        #connection_state{} = ConnState ->
-            {ok, ConnState};
-        undefined ->
-            {error, no_state}
-    end.
+    maps:get(Pid, State#state.connections, undefined).
 
 -spec set_connection_state(connection_pid(), connection_state(), state()) -> state().
 set_connection_state(Pid, Connection, State) ->
@@ -500,7 +495,7 @@ close_gun_connection(ConnectionPid) ->
 -spec handle_connection_started(connection_pid(), state()) -> {ok, state()} | {error, invalid_connection_state}.
 handle_connection_started(ConnectionPid, State) ->
     case get_connection_state(ConnectionPid, State) of
-        {ok, #connection_state{status = {starting, {ClientPid, _} = Requester}} = ConnSt} ->
+        #connection_state{status = {starting, {ClientPid, _} = Requester}} = ConnSt ->
             ConnSt1 = ConnSt#connection_state{status = {up, unlocked}},
             ConnSt2 = reset_connection_idle(ConnSt1),
             ok = reply_to_requester({ok, ConnectionPid}, Requester),
@@ -520,9 +515,9 @@ reply_to_requester(Message, Requester) ->
 -spec handle_connection_down(connection_pid(), Reason :: _, state()) -> {ok, state()} | {error, no_connection_state}.
 handle_connection_down(ConnectionPid, Reason, State) ->
     case get_connection_state(ConnectionPid, State) of
-        {ok, ConnSt} ->
+        #connection_state{} = ConnSt ->
             {ok, process_connection_removal(ConnSt, Reason, State)};
-        _ ->
+        undefined ->
             {error, no_connection_state}
     end.
 
@@ -552,7 +547,7 @@ remove_connection(#connection_state{pid = ConnPid}, State) ->
 -spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> {ok, state()} | {error, invalid_client_state}.
 handle_client_down(ClientPid, Mref, _Reason, State) ->
     case get_client_state(ClientPid, State) of
-        {ok, #client_state{mref = Mref, connections = Connections}} ->
+        #client_state{mref = Mref, connections = Connections} ->
             {ok, unlock_client_connections(Connections, State)};
         _ ->
             {error, invalid_client_state}
@@ -646,7 +641,7 @@ lock_connection(ConnectionPid, ClientPid, State) ->
 
 -spec do_lock_connection(connection_pid(), client_pid(), state()) -> state().
 do_lock_connection(ConnectionPid, ClientPid, State) ->
-    {ok, ConnectionSt} = get_connection_state(ConnectionPid, State),
+    ConnectionSt = get_connection_state(ConnectionPid, State),
     ConnectionSt1 = ConnectionSt#connection_state{status = {up, {locked, ClientPid}}},
     set_connection_state(ConnectionPid, ConnectionSt1, State).
 
@@ -661,13 +656,13 @@ unlock_connection(ConnectionPid, ClientPid, State) ->
 
 -spec do_unlock_connection(connection_pid(), state()) -> state().
 do_unlock_connection(ConnectionPid, State) ->
-    {ok, ConnectionSt} = get_connection_state(ConnectionPid, State),
+    ConnectionSt = get_connection_state(ConnectionPid, State),
     ConnectionSt1 = ConnectionSt#connection_state{status = {up, unlocked}},
     set_connection_state(ConnectionPid, ConnectionSt1, State).
 
 -spec remove_connection_from_client_state(connection_pid(), client_pid(), state()) -> state().
 remove_connection_from_client_state(ConnectionPid, ClientPid, State) ->
-    {ok, ClientSt} = get_client_state(ClientPid, State),
+    ClientSt = get_client_state(ClientPid, State),
     ClientSt1 = do_remove_connection_from_client(ConnectionPid, ClientSt),
     case ClientSt1#client_state.connections of
         [] ->
@@ -686,9 +681,9 @@ do_remove_connection_from_client(ConnectionPid, ClientSt = #client_state{connect
 -spec get_or_create_client_state(client_pid(), state()) -> client_state().
 get_or_create_client_state(ClientPid, State) ->
     case get_client_state(ClientPid, State) of
-        {ok, ClientSt} ->
+        #client_state{} = ClientSt ->
             ClientSt;
-        {error, no_state} ->
+        undefined ->
             create_client_state(ClientPid)
     end.
 
@@ -704,14 +699,9 @@ create_client_state(ClientPid) ->
 destroy_client_state(#client_state{mref = Mref}) ->
     true = erlang:demonitor(Mref, [flush]).
 
--spec get_client_state(client_pid(), state()) -> {ok, client_state()} | {error, no_state}.
+-spec get_client_state(client_pid(), state()) -> client_state() | undefined.
 get_client_state(Pid, State) ->
-    case maps:get(Pid, State#state.clients, undefined) of
-        #client_state{} = ClientSt ->
-            {ok, ClientSt};
-        undefined ->
-            {error, no_state}
-    end.
+    maps:get(Pid, State#state.clients, undefined).
 
 -spec set_client_state(client_pid(), client_state(), state()) -> state().
 set_client_state(Pid, ClientSt, State) ->
