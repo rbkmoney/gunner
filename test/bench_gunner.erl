@@ -60,11 +60,13 @@ bench_gunner_pool_locking(PoolID, _) ->
 
 %%
 
+-spec start_mock_server() -> ok.
 start_mock_server() ->
     start_mock_server(fun(_) ->
         {200, #{}, <<"ok">>}
     end).
 
+-spec start_mock_server(fun()) -> ok.
 start_mock_server(HandlerFun) ->
     Conf = #{request_timeout => infinity},
     _ = mock_http_server:start(default, 8080, HandlerFun, Conf),
@@ -72,11 +74,13 @@ start_mock_server(HandlerFun) ->
     _ = mock_http_server:start(alternative_2, 8087, HandlerFun, Conf),
     ok.
 
+-spec stop_mock_server() -> ok.
 stop_mock_server() ->
     ok = mock_http_server:stop(default),
     ok = mock_http_server:stop(alternative_1),
     ok = mock_http_server:stop(alternative_2).
 
+-spec valid_host() -> {inet:hostname(), inet:port_number()}.
 valid_host() ->
     Hosts = [
         {"localhost", 8080},

@@ -506,6 +506,7 @@ handle_connection_started(ConnectionPid, State) ->
     State2 = dec_starting_count(inc_active_count(State1)),
     maybe_lock_connection(ConnectionPid, ClientPid, State2).
 
+-spec reply_to_requester(term(), requester()) -> ok.
 reply_to_requester(Message, Requester) ->
     _ = gen_server:reply(Requester, Message),
     ok.
@@ -527,16 +528,19 @@ process_connection_removal(ConnState = #connection_state{status = up}, _Reason, 
 process_connection_removal(ConnState = #connection_state{status = down}, _Reason, State) ->
     remove_down_connection(ConnState, State).
 
+-spec remove_up_connection(connection_state(), state()) -> state().
 remove_up_connection(ConnState = #connection_state{idx = ConnIdx}, State) ->
     State1 = free_connection_idx(ConnIdx, State),
     remove_down_connection(ConnState, dec_active_count(State1)).
 
+-spec remove_down_connection(connection_state(), state()) -> state().
 remove_down_connection(ConnState = #connection_state{lock = unlocked}, State) ->
     remove_connection(ConnState, State);
 remove_down_connection(ConnState = #connection_state{lock = {locked, ClientPid}}, State) ->
     State1 = remove_connection_from_client_state(ConnState#connection_state.pid, ClientPid, State),
     remove_connection(ConnState, State1).
 
+-spec remove_connection(connection_state(), state()) -> state().
 remove_connection(#connection_state{pid = ConnPid}, State) ->
     remove_connection_state(ConnPid, State).
 
@@ -565,13 +569,13 @@ get_cleanup_size_budget(State) ->
     State#state.active_count - State#state.min_size.
 
 -spec process_connection_cleanup(next_conn(), integer(), state()) -> state().
-process_connection_cleanup({Pid, ConnSt, Iter}, SizeBudget, State) when SizeBudget >= 0 ->
+process_connection_cleanup({Pid, ConnSt, Iter}, SizeBudget, State) when SizeBudget > 0 ->
     MaxAge = State#state.max_connection_idle_age,
     CurrentTime = erlang:monotonic_time(millisecond),
     ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
     case ConnSt of
         #connection_state{status = up, idle_since = IdleSince, idx = ConnIdx} when
-            IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0, SizeBudget > 0
+            IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0
         ->
             %% Close connection, 'EXIT' msg will remove it from state
             ok = close_gun_connection(Pid),

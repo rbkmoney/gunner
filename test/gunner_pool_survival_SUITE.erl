@@ -102,6 +102,7 @@ init_per_testcase(_Name, C) ->
 end_per_testcase(_Name, _C) ->
     ok.
 
+-spec get_group_spec(group_name()) -> list().
 get_group_spec(survival) ->
     [
         {normal_client, 0.8},
@@ -115,10 +116,12 @@ get_group_spec(survival_locking) ->
         {confused_client, 0.1}
     ].
 
+-spec create_group(group_name(), Total :: integer()) -> list().
 create_group(GroupName, TotalTests) ->
     Spec = get_group_spec(GroupName),
     make_testcase_list(Spec, TotalTests, []).
 
+-spec make_testcase_list(Cases :: list(), Total :: integer(), Acc :: list()) -> list().
 make_testcase_list([], _TotalTests, Acc) ->
     lists:flatten(Acc);
 make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
@@ -168,6 +171,7 @@ confused_client(C) ->
 
 %%
 
+-spec valid_host() -> {inet:hostname(), inet:port_number()}.
 valid_host() ->
     Hosts = [
         {"localhost", 8080},
@@ -178,18 +182,21 @@ valid_host() ->
 
 %%
 
+-spec start_mock_server() -> ok.
 start_mock_server() ->
     start_mock_server(fun(#{path := Path}) ->
         _ = timer:sleep(rand:uniform(?COWBOY_HANDLER_MAX_SLEEP_DURATION)),
         {200, #{}, <<"ok", Path/binary>>}
     end).
 
+-spec start_mock_server(fun()) -> ok.
 start_mock_server(HandlerFun) ->
     _ = mock_http_server:start(default, 8080, HandlerFun),
     _ = mock_http_server:start(alternative_1, 8086, HandlerFun),
     _ = mock_http_server:start(alternative_2, 8087, HandlerFun),
     ok.
 
+-spec stop_mock_server() -> ok.
 stop_mock_server() ->
     ok = mock_http_server:stop(default),
     ok = mock_http_server:stop(alternative_1),
@@ -197,6 +204,7 @@ stop_mock_server() ->
 
 %%
 
+-spec await(gunner:gunner_stream_ref(), timeout()) -> {ok, Response :: _} | {error, Reason :: _}.
 await(PoolRef, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
     case gunner:await(PoolRef, Timeout) of
