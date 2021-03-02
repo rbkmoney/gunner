@@ -14,10 +14,13 @@
 
 %% API Request wrappers
 
+-export([get/3]).
 -export([get/4]).
 -export([get/5]).
 -export([get/6]).
 
+-export([post/4]).
+-export([post/5]).
 -export([post/6]).
 -export([post/7]).
 
@@ -46,22 +49,27 @@
 
 %% API types
 
--type connection_args() :: {conn_host(), conn_port()}.
+-type pool() :: gunner_pool:pool_pid().
+-type pool_id() :: gunner_pool:pool_id().
+-type pool_opts() :: gunner_pool:pool_opts().
 
--opaque gunner_stream_ref() :: {gunner_ref, connection_pid(), gun:stream_ref()}.
+-type end_host() :: inet:hostname() | inet:ip_address().
+-type end_port() :: inet:port_number().
+-type endpoint() :: {end_host(), end_port()}.
 
--export_type([connection_args/0]).
--export_type([gunner_stream_ref/0]).
+-opaque stream_ref() :: {connection_pid(), gun:stream_ref()}.
+
+-export_type([pool/0]).
+-export_type([pool_id/0]).
+-export_type([pool_opts/0]).
+-export_type([end_host/0]).
+-export_type([end_port/0]).
+-export_type([endpoint/0]).
+-export_type([stream_ref/0]).
 
 %% Internal types
 
--type pool_id() :: gunner_pool:pool_id().
--type pool_pid() :: gunner_pool:pool_pid().
 -type pool_reg_name() :: gunner_pool:pool_reg_name().
--type pool_opts() :: gunner_pool:pool_opts().
-
--type conn_host() :: inet:hostname() | inet:ip_address().
--type conn_port() :: inet:port_number().
 
 -type method() :: binary().
 -type path() :: iodata().
@@ -71,11 +79,11 @@
 
 -type connection_pid() :: gunner_pool:connection_pid().
 
--type request_return() ::
-    {ok, gunner_stream_ref()} | {error, acquire_error()}.
+-type request_return() :: {ok, stream_ref()} | {error, request_error()}.
 
--type acquire_error() ::
-    pool_not_found | pool_unavailable | {failed_to_start_connection, Why :: _} | {connection_failed, Why :: _}.
+-type request_error() ::
+    {resolve_failed, gunner_resolver:resolve_error()} |
+    gunner_pool:acquire_error().
 
 %% Copypasted from gun.erl
 -type resp_headers() :: [{binary(), binary()}].
@@ -105,17 +113,17 @@
 %% API functions
 %%
 
--spec start_pool(pool_opts()) -> {ok, gunner_pool:pool_pid()} | {error, already_exists}.
+-spec start_pool(pool_opts()) -> {ok, pool()} | {error, already_exists}.
 start_pool(PoolOpts) ->
     gunner_pool:start_pool(PoolOpts).
 
--spec start_pool(pool_reg_name(), pool_opts()) -> {ok, gunner_pool:pool_pid()} | {error, already_exists}.
+-spec start_pool(pool_reg_name(), pool_opts()) -> {ok, pool()} | {error, already_exists}.
 start_pool(PoolID, PoolOpts) ->
     gunner_pool:start_pool(PoolID, PoolOpts).
 
--spec stop_pool(pool_pid()) -> ok | {error, not_found}.
-stop_pool(PoolID) ->
-    gunner_pool:stop_pool(PoolID).
+-spec stop_pool(pool()) -> ok | {error, not_found}.
+stop_pool(Pool) ->
+    gunner_pool:stop_pool(Pool).
 
 -spec pool_status(pool_id()) -> {ok, gunner_pool:pool_status_response()} | {error, pool_not_found}.
 pool_status(PoolID) ->
@@ -127,75 +135,79 @@ pool_status(PoolID, Timeout) ->
 
 %%
 
--spec get(pool_id(), connection_args(), path(), timeout()) -> request_return().
-get(PoolID, ConnectionArgs, Path, Timeout) ->
-    request(PoolID, ConnectionArgs, <<"GET">>, Path, [], <<>>, #{}, Timeout).
+-spec get(pool_id(), endpoint(), path()) -> request_return().
+get(PoolID, Endpoint, Path) ->
+    get(PoolID, Endpoint, Path, []).
 
--spec get(pool_id(), connection_args(), path(), req_headers(), timeout()) -> request_return().
-get(PoolID, ConnectionArgs, Path, Headers, Timeout) ->
-    request(PoolID, ConnectionArgs, <<"GET">>, Path, Headers, <<>>, #{}, Timeout).
+-spec get(pool_id(), endpoint(), path(), req_headers()) -> request_return().
+get(PoolID, Endpoint, Path, Headers) ->
+    get(PoolID, Endpoint, Path, Headers, #{}).
 
--spec get(pool_id(), connection_args(), path(), req_headers(), req_opts(), timeout()) -> request_return().
-get(PoolID, ConnectionArgs, Path, Headers, ReqOpts, Timeout) ->
-    request(PoolID, ConnectionArgs, <<"GET">>, Path, Headers, <<>>, ReqOpts, Timeout).
+-spec get(pool_id(), endpoint(), path(), req_headers(), req_opts()) -> request_return().
+get(PoolID, Endpoint, Path, Headers, ReqOpts) ->
+    request(PoolID, Endpoint, <<"GET">>, Path, Headers, <<>>, ReqOpts).
 
-%%
-
--spec post(pool_id(), connection_args(), path(), req_headers(), body(), timeout()) -> request_return().
-post(PoolID, ConnectionArgs, Path, Headers, Body, Timeout) ->
-    request(PoolID, ConnectionArgs, <<"POST">>, Path, Headers, Body, #{}, Timeout).
-
--spec post(pool_id(), connection_args(), path(), req_headers(), body(), req_opts(), timeout()) -> request_return().
-post(PoolID, ConnectionArgs, Path, Headers, Body, ReqOpts, Timeout) ->
-    request(PoolID, ConnectionArgs, <<"POST">>, Path, Headers, Body, ReqOpts, Timeout).
+-spec get(pool_id(), endpoint(), path(), req_headers(), req_opts(), timeout()) -> request_return().
+get(PoolID, Endpoint, Path, Headers, ReqOpts, AcquireTimeout) ->
+    request(PoolID, Endpoint, <<"GET">>, Path, Headers, <<>>, ReqOpts, AcquireTimeout).
 
 %%
 
+-spec post(pool_id(), endpoint(), path(), body()) -> request_return().
+post(PoolID, Endpoint, Path, Body) ->
+    post(PoolID, Endpoint, Path, Body, []).
+
+-spec post(pool_id(), endpoint(), path(), body(), req_headers()) -> request_return().
+post(PoolID, Endpoint, Path, Body, Headers) ->
+    post(PoolID, Endpoint, Path, Body, Headers, #{}).
+
+-spec post(pool_id(), endpoint(), path(), body(), req_headers(), req_opts()) -> request_return().
+post(PoolID, Endpoint, Path, Body, Headers, ReqOpts) ->
+    request(PoolID, Endpoint, <<"POST">>, Path, Headers, Body, ReqOpts).
+
+-spec post(pool_id(), endpoint(), path(), body(), req_headers(), req_opts(), timeout()) -> request_return().
+post(PoolID, Endpoint, Path, Body, Headers, ReqOpts, AcquireTimeout) ->
+    request(PoolID, Endpoint, <<"POST">>, Path, Headers, Body, ReqOpts, AcquireTimeout).
+
 %%
 
--spec request(pool_id(), connection_args(), method(), path(), req_headers(), body(), req_opts()) -> request_return().
-request(PoolID, ConnectionArgs, Method, Path, Headers, Body, ReqOpts) ->
-    request(PoolID, ConnectionArgs, Method, Path, Headers, Body, ReqOpts, ?DEFAULT_TIMEOUT).
+-spec request(pool_id(), endpoint(), method(), path(), req_headers(), body(), req_opts()) -> request_return().
+request(PoolID, Endpoint, Method, Path, Headers, Body, ReqOpts) ->
+    request(PoolID, Endpoint, Method, Path, Headers, Body, ReqOpts, ?DEFAULT_TIMEOUT).
 
--spec request(pool_id(), connection_args(), method(), path(), req_headers(), body(), req_opts(), timeout()) ->
+-spec request(pool_id(), endpoint(), method(), path(), req_headers(), body(), req_opts(), timeout()) ->
     request_return().
-request(PoolID, ConnectionArgs, Method, Path, Headers, Body, ReqOpts, Timeout) ->
-    case gunner_pool:acquire(PoolID, ConnectionArgs, Timeout) of
-        {ok, ConnectionPid} ->
-            StreamRef = gun:request(ConnectionPid, Method, Path, Headers, Body, ReqOpts),
-            {ok, {gunner_ref, ConnectionPid, StreamRef}};
-        {error, _Reason} = Error ->
-            Error
-    end.
+request(PoolID, Endpoint, Method, Path, Headers, Body, ReqOpts, AcquireTimeout) ->
+    do_request(PoolID, Endpoint, Method, Path, Headers, Body, ReqOpts, AcquireTimeout).
 
 %%
 
--spec free(pool_id(), gunner_stream_ref()) ->
+-spec free(pool_id(), stream_ref()) ->
     ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
 free(PoolID, GStreamRef) ->
     free(PoolID, GStreamRef, ?DEFAULT_TIMEOUT).
 
--spec free(pool_id(), gunner_stream_ref(), timeout()) ->
+-spec free(pool_id(), stream_ref(), timeout()) ->
     ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
-free(PoolID, {gunner_ref, ConnectionPid, _}, Timeout) ->
+free(PoolID, {ConnectionPid, _}, Timeout) ->
     gunner_pool:free(PoolID, ConnectionPid, Timeout).
 
 %%
 
--spec await(gunner_stream_ref()) -> await_result().
-await({gunner_ref, ConnPid, StreamRef}) ->
+-spec await(stream_ref()) -> await_result().
+await({ConnPid, StreamRef}) ->
     gun:await(ConnPid, StreamRef).
 
--spec await(gunner_stream_ref(), timeout()) -> await_result().
-await({gunner_ref, ConnPid, StreamRef}, Timeout) ->
+-spec await(stream_ref(), timeout()) -> await_result().
+await({ConnPid, StreamRef}, Timeout) ->
     gun:await(ConnPid, StreamRef, Timeout).
 
--spec await_body(gunner_stream_ref()) -> await_body_result().
-await_body({gunner_ref, ConnPid, StreamRef}) ->
+-spec await_body(stream_ref()) -> await_body_result().
+await_body({ConnPid, StreamRef}) ->
     gun:await_body(ConnPid, StreamRef).
 
--spec await_body(gunner_stream_ref(), timeout()) -> await_body_result().
-await_body({gunner_ref, ConnPid, StreamRef}, Timeout) ->
+-spec await_body(stream_ref(), timeout()) -> await_body_result().
+await_body({ConnPid, StreamRef}, Timeout) ->
     gun:await_body(ConnPid, StreamRef, Timeout).
 
 %%
@@ -209,3 +221,28 @@ start(_StartType, _StartArgs) ->
 -spec stop(any()) -> ok.
 stop(_State) ->
     ok.
+
+%%
+%% Internal functions
+%%
+
+-spec do_request(pool_id(), endpoint(), method(), path(), req_headers(), body(), req_opts(), timeout()) ->
+    request_return().
+do_request(PoolID, Endpoint, Method, Path, Headers, Body, ReqOpts, AcquireTimeout) ->
+    case acquire_connection(PoolID, Endpoint, AcquireTimeout) of
+        {ok, ConnectionPid} ->
+            StreamRef = gun:request(ConnectionPid, Method, Path, Headers, Body, ReqOpts),
+            {ok, {ConnectionPid, StreamRef}};
+        {error, _} = Error ->
+            Error
+    end.
+
+acquire_connection(PoolID, Endpoint, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    case gunner_resolver:resolve_endpoint(Endpoint, #{timeout => Timeout}) of
+        {ok, ResolvedEndpoint} ->
+            TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
+            gunner_pool:acquire(PoolID, ResolvedEndpoint, TimeoutLeft);
+        {error, Reason} ->
+            {error, {resolve_failed, Reason}}
+    end.

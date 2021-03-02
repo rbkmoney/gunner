@@ -32,7 +32,7 @@
 
 -define(COWBOY_HANDLER_MAX_SLEEP_DURATION, 2500).
 
--define(GUNNER_REF(ConnectionPid, StreamRef), {gunner_ref, ConnectionPid, StreamRef}).
+-define(GUNNER_REF(ConnectionPid, StreamRef), {ConnectionPid, StreamRef}).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
@@ -133,7 +133,7 @@ make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>, 1000) of
+    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>) of
         {ok, PoolRef} ->
             {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2);
         {error, pool_unavailable} ->
@@ -143,7 +143,7 @@ normal_client(C) ->
 -spec normal_locking_client(config()) -> test_return().
 normal_locking_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>, 1000) of
+    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>) of
         {ok, PoolRef} ->
             {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
             _ = gunner:free(?POOL_ID(C), PoolRef);
@@ -153,8 +153,8 @@ normal_locking_client(C) ->
 
 -spec misinformed_client(config()) -> test_return().
 misinformed_client(C) ->
-    case gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>, 1000) of
-        {error, {connection_failed, _}} ->
+    case gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>) of
+        {error, {connection_failed, {shutdown, econnrefused}}} ->
             ok;
         {error, pool_unavailable} ->
             ok
@@ -162,8 +162,8 @@ misinformed_client(C) ->
 
 -spec confused_client(config()) -> test_return().
 confused_client(C) ->
-    case gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>, 1000) of
-        {error, {connection_failed, _}} ->
+    case gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>) of
+        {error, {resolve_failed, nxdomain}} ->
             ok;
         {error, pool_unavailable} ->
             ok

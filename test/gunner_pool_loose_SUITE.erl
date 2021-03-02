@@ -36,7 +36,7 @@
 
 -define(H_CLEANUP_TIMEOUT, ?POOL_MAX_CONNECTION_IDLE_AGE + ?POOL_CLEANUP_INTERVAL * 2).
 
--define(GUNNER_REF(ConnectionPid, StreamRef), {gunner_ref, ConnectionPid, StreamRef}).
+-define(GUNNER_REF(ConnectionPid, StreamRef), {ConnectionPid, StreamRef}).
 
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
@@ -125,32 +125,30 @@ basic_lifetime_ok_test(C) ->
 
 -spec connection_failed_test(config()) -> test_return().
 connection_failed_test(C) ->
-    {error, {connection_failed, Reason1}} = gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>, 1000),
-    ?assert(lists:member(Reason1, [{shutdown, nxdomain}, unknown])),
-    {error, {connection_failed, Reason2}} = gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>, 1000),
-    ?assert(lists:member(Reason2, [{shutdown, econnrefused}, unknown])).
+    {error, {resolve_failed, nxdomain}} = gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>),
+    {error, {connection_failed, {shutdown, econnrefused}}} = gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>).
 
 -spec different_connections_from_same_group_test(config()) -> test_return().
 different_connections_from_same_group_test(C) ->
     Host = valid_host(),
-    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_ID(C), Host, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_ID(C), Host, <<"/">>),
     %% Because of how pool is implemented, there is no guarantee that (almost) simultaneous requests
     %% to small pools and same connection groups will actually get different connection processes
     _ = timer:sleep(100),
-    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_ID(C), Host, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_ID(C), Host, <<"/">>),
     ?assertNotEqual(ConnectionPid1, ConnectionPid2).
 
 -spec different_connections_from_different_groups_test(config()) -> test_return().
 different_connections_from_different_groups_test(C) ->
-    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_ID(C), {"localhost", 8080}, <<"/">>, 1000),
-    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_ID(C), {"localhost", 8086}, <<"/">>, 1000),
+    {ok, ?GUNNER_REF(ConnectionPid1, _)} = gunner:get(?POOL_ID(C), {"localhost", 8080}, <<"/">>),
+    {ok, ?GUNNER_REF(ConnectionPid2, _)} = gunner:get(?POOL_ID(C), {"localhost", 8086}, <<"/">>),
     ?assertNotEqual(ConnectionPid1, ConnectionPid2).
 
 -spec pool_resizing_test(config()) -> test_return().
 pool_resizing_test(C) ->
     _ = lists:foreach(
         fun(_) ->
-            case gunner:get(?POOL_ID(C), valid_host(), <<"/">>, 1000) of
+            case gunner:get(?POOL_ID(C), valid_host(), <<"/">>) of
                 {ok, _} ->
                     ok;
                 {error, pool_unavailable} ->
@@ -169,7 +167,7 @@ pool_resizing_test(C) ->
 
 get(PoolID, ConnectionArgs, Path, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    {ok, PoolRef} = gunner:get(PoolID, ConnectionArgs, Path, Timeout),
+    {ok, PoolRef} = gunner:get(PoolID, ConnectionArgs, Path, [], #{}, Timeout),
     TimeoutLeft1 = Deadline - erlang:monotonic_time(millisecond),
     case gunner:await(PoolRef, TimeoutLeft1) of
         {response, nofin, 200, _Headers} ->

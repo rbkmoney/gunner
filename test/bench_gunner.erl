@@ -31,7 +31,7 @@ gunner_pool_loose({stop, State}) ->
 
 -spec bench_gunner_pool_loose(_, _) -> _.
 bench_gunner_pool_loose(PoolID, _) ->
-    {ok, _} = gunner:get(PoolID, valid_host(), <<"/">>, 1000).
+    {ok, _} = gunner:get(PoolID, valid_host(), <<"/">>).
 
 %%
 
@@ -55,8 +55,8 @@ gunner_pool_locking({stop, State}) ->
 
 -spec bench_gunner_pool_locking(_, _) -> _.
 bench_gunner_pool_locking(PoolID, _) ->
-    {ok, StreamRef} = gunner:get(PoolID, valid_host(), <<"/">>, 1000),
-    _ = gunner:free(PoolID, StreamRef, 1000).
+    {ok, StreamRef} = gunner:get(PoolID, valid_host(), <<"/">>),
+    _ = gunner:free(PoolID, StreamRef).
 
 %%
 

@@ -74,6 +74,11 @@
 
 -type pool_status_response() :: #{total_connections := size(), available_connections := size()}.
 
+-type acquire_error() ::
+    pool_not_found |
+    pool_unavailable |
+    {failed_to_start_connection | connection_failed, _}.
+
 -export_type([connection_pid/0]).
 
 -export_type([pool_pid/0]).
@@ -90,6 +95,8 @@
 
 -export_type([group_id/0]).
 -export_type([pool_status_response/0]).
+
+-export_type([acquire_error/0]).
 
 %% Internal types
 
@@ -127,7 +134,7 @@
 -type connection_lock() :: unlocked | {locked, Owner :: pid()}.
 -type connection_idx() :: gunner_idx_authority:idx().
 
--type connection_args() :: gunner:connection_args().
+-type endpoint() :: gunner:endpoint().
 
 -type client_pid() :: pid().
 -type clients() :: #{client_pid() => client_state()}.
@@ -200,11 +207,11 @@ start_link(PoolRegName, PoolOpts) ->
 
 %%
 
--spec acquire(pool_id(), connection_args(), timeout()) ->
+-spec acquire(pool_id(), endpoint(), timeout()) ->
     {ok, connection_pid()} |
-    {error, pool_not_found | pool_unavailable | {failed_to_start_connection | connection_failed, _}}.
-acquire(PoolID, ConnectionArgs, Timeout) ->
-    call_pool(PoolID, {acquire, ConnectionArgs}, Timeout).
+    {error, acquire_error()}.
+acquire(PoolID, Endpoint, Timeout) ->
+    call_pool(PoolID, {acquire, Endpoint}, Timeout).
 
 -spec free(pool_id(), connection_pid(), timeout()) ->
     ok |
@@ -239,7 +246,7 @@ init([PoolOpts]) ->
     {ok, State}.
 
 -spec handle_call
-    ({acquire, connection_args()}, from(), state()) ->
+    ({acquire, endpoint()}, from(), state()) ->
         {noreply, state()} |
         {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
             state()};
@@ -247,8 +254,8 @@ init([PoolOpts]) ->
         {reply, ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}, state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
-handle_call({acquire, ConnectionArgs}, From, State) ->
-    case handle_acquire_connection(ConnectionArgs, From, State) of
+handle_call({acquire, Endpoint}, From, State) ->
+    case handle_acquire_connection(Endpoint, From, State) of
         {{ok, {connection, Connection}}, NewState} ->
             {reply, {ok, Connection}, NewState};
         {{ok, connection_started}, NewState} ->
@@ -316,16 +323,16 @@ new_state(Opts) ->
 
 %%
 
--spec handle_acquire_connection(connection_args(), requester(), state()) -> {Result, state()} | Error when
+-spec handle_acquire_connection(endpoint(), requester(), state()) -> {Result, state()} | Error when
     Result :: {ok, {connection, connection_pid()} | connection_started},
     Error :: {error, {failed_to_start_connection, _Reason} | pool_unavailable}.
-handle_acquire_connection(ConnectionArgs, {ClientPid, _} = From, State) ->
-    GroupID = create_group_id(ConnectionArgs),
+handle_acquire_connection(Endpoint, {ClientPid, _} = From, State) ->
+    GroupID = create_group_id(Endpoint),
     case acquire_connection_from_group(GroupID, State) of
         {connection, ConnPid, St1} ->
             {{ok, {connection, ConnPid}}, maybe_lock_connection(ConnPid, ClientPid, St1)};
         no_connection ->
-            case handle_connection_creation(GroupID, ConnectionArgs, From, State) of
+            case handle_connection_creation(GroupID, Endpoint, From, State) of
                 {ok, State1} ->
                     {{ok, connection_started}, State1};
                 {error, _Reason} = Error ->
@@ -333,9 +340,9 @@ handle_acquire_connection(ConnectionArgs, {ClientPid, _} = From, State) ->
             end
     end.
 
--spec create_group_id(connection_args()) -> group_id().
-create_group_id(ConnectionArgs) ->
-    ConnectionArgs.
+-spec create_group_id(endpoint()) -> group_id().
+create_group_id(Endpoint) ->
+    Endpoint.
 
 -spec acquire_connection_from_group(group_id(), state()) -> {connection, connection_pid(), state()} | no_connection.
 acquire_connection_from_group(GroupID, State) ->
@@ -430,13 +437,13 @@ free_connection_idx(Idx, State) ->
 
 %%
 
--spec handle_connection_creation(group_id(), connection_args(), requester(), state()) ->
+-spec handle_connection_creation(group_id(), endpoint(), requester(), state()) ->
     {ok, state()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}}.
-handle_connection_creation(GroupID, ConnectionArgs, Requester, State) ->
+handle_connection_creation(GroupID, Endpoint, Requester, State) ->
     case is_pool_available(State) of
         true ->
             {Idx, State1} = new_connection_idx(State),
-            case open_gun_connection(ConnectionArgs, Idx, State) of
+            case open_gun_connection(Endpoint, Idx, State) of
                 {ok, Pid} ->
                     ConnectionState = new_connection_state(Requester, GroupID, Idx, Pid),
                     {ok, set_connection_state(Pid, ConnectionState, inc_starting_count(State1))};
@@ -467,8 +474,7 @@ new_connection_state(Requester, GroupID, Idx, Pid) ->
 
 %%
 
--spec open_gun_connection(connection_args(), connection_idx(), state()) ->
-    {ok, connection_pid()} | {error, Reason :: _}.
+-spec open_gun_connection(endpoint(), connection_idx(), state()) -> {ok, connection_pid()} | {error, Reason :: _}.
 open_gun_connection({Host, Port}, Idx, State) ->
     Opts = get_gun_opts(Idx, State),
     gun:open(Host, Port, Opts).
