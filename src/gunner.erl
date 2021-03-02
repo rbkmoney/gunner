@@ -59,6 +59,10 @@
 
 -opaque stream_ref() :: {connection_pid(), gun:stream_ref()}.
 
+-type request_error() ::
+    {resolve_failed, gunner_resolver:resolve_error()} |
+    gunner_pool:acquire_error().
+
 -export_type([pool/0]).
 -export_type([pool_id/0]).
 -export_type([pool_opts/0]).
@@ -66,6 +70,8 @@
 -export_type([end_port/0]).
 -export_type([endpoint/0]).
 -export_type([stream_ref/0]).
+
+-export_type([request_error/0]).
 
 %% Internal types
 
@@ -80,10 +86,6 @@
 -type connection_pid() :: gunner_pool:connection_pid().
 
 -type request_return() :: {ok, stream_ref()} | {error, request_error()}.
-
--type request_error() ::
-    {resolve_failed, gunner_resolver:resolve_error()} |
-    gunner_pool:acquire_error().
 
 %% Copypasted from gun.erl
 -type resp_headers() :: [{binary(), binary()}].
