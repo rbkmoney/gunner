@@ -125,7 +125,7 @@ basic_lifetime_ok_test(C) ->
 
 -spec connection_failed_test(config()) -> test_return().
 connection_failed_test(C) ->
-    {error, {resolve_failed, nxdomain}} = gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>),
+    {error, {connection_failed, {shutdown, nxdomain}}} = gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>),
     {error, {connection_failed, {shutdown, econnrefused}}} = gunner:get(?POOL_ID(C), {"localhost", 8090}, <<"/">>).
 
 -spec different_connections_from_same_group_test(config()) -> test_return().

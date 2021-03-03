@@ -56,15 +56,12 @@
 
 -type opts() :: #{
     req_opts => gun:req_opts(),
-    acquire_timeout => timeout(),
-    resolver_ip_picker => gunner_resolver:ip_picker()
+    acquire_timeout => timeout()
 }.
 
 -opaque stream_ref() :: {connection_pid(), gun:stream_ref()}.
 
--type request_error() ::
-    {resolve_failed, gunner_resolver:resolve_error()} |
-    gunner_pool:acquire_error().
+-type request_error() :: gunner_pool:acquire_error().
 
 -export_type([pool/0]).
 -export_type([pool_id/0]).
@@ -170,7 +167,14 @@ post(PoolID, Endpoint, Path, Body, Headers, Opts) ->
 
 -spec request(pool_id(), endpoint(), method(), path(), req_headers(), body(), opts()) -> request_return().
 request(PoolID, Endpoint, Method, Path, Headers, Body, Opts) ->
-    do_request(PoolID, Endpoint, Method, Path, Headers, Body, Opts).
+    Timeout = maps:get(acquire_timeout, Opts, ?DEFAULT_TIMEOUT),
+    case gunner_pool:acquire(PoolID, Endpoint, Timeout) of
+        {ok, ConnectionPid} ->
+            StreamRef = gun:request(ConnectionPid, Method, Path, Headers, Body, maps:get(req_opts, Opts, #{})),
+            {ok, {ConnectionPid, StreamRef}};
+        {error, _} = Error ->
+            Error
+    end.
 
 %%
 
@@ -213,34 +217,3 @@ start(_StartType, _StartArgs) ->
 -spec stop(any()) -> ok.
 stop(_State) ->
     ok.
-
-%%
-%% Internal functions
-%%
-
--spec do_request(pool_id(), endpoint(), method(), path(), req_headers(), body(), opts()) -> request_return().
-do_request(PoolID, Endpoint, Method, Path, Headers, Body, Opts) ->
-    case acquire_connection(PoolID, Endpoint, Opts) of
-        {ok, ConnectionPid} ->
-            StreamRef = gun:request(ConnectionPid, Method, Path, Headers, Body, maps:get(req_opts, Opts, #{})),
-            {ok, {ConnectionPid, StreamRef}};
-        {error, _} = Error ->
-            Error
-    end.
-
-acquire_connection(PoolID, Endpoint, Opts) ->
-    Timeout = maps:get(acquire_timeout, Opts, ?DEFAULT_TIMEOUT),
-    Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    case gunner_resolver:resolve_endpoint(Endpoint, make_resolver_opts(Opts, Timeout)) of
-        {ok, ResolvedEndpoint} ->
-            TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
-            gunner_pool:acquire(PoolID, ResolvedEndpoint, TimeoutLeft);
-        {error, Reason} ->
-            {error, {resolve_failed, Reason}}
-    end.
-
-make_resolver_opts(Opts, Timeout) ->
-    genlib_map:compact(#{
-        ip_picker => maps:get(resolver_ip_picker, Opts, undefined),
-        timeout => Timeout
-    }).

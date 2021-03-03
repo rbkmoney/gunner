@@ -61,13 +61,17 @@
 %% cleanup operations.
 -type min_size() :: size().
 
+%% @doc Gun opts used when creating new connections in this pool. See `gun:opts/0`.
+-type connection_opts() :: gun:opts().
+
 -type pool_opts() :: #{
     mode => pool_mode(),
     cleanup_interval => cleanup_interval(),
     max_connection_load => max_connection_load(),
     max_connection_idle_age => max_connection_idle_age(),
     max_size => max_size(),
-    min_size => min_size()
+    min_size => min_size(),
+    connection_opts => connection_opts()
 }.
 
 -type group_id() :: term().
@@ -103,6 +107,7 @@
 -record(state, {
     mode = loose :: pool_mode(),
     connections = #{} :: connections(),
+    connection_opts :: connection_opts(),
     clients = #{} :: clients(),
     counters_ref :: counters:counters_ref(),
     idx_authority :: gunner_idx_authority:t(),
@@ -154,7 +159,7 @@
 
 %%
 
--define(DEFAULT_CLIENT_OPTS, #{connect_timeout => 5000}).
+-define(DEFAULT_CONNECTION_OPTS, #{connect_timeout => 5000}).
 
 -define(DEFAULT_MODE, loose).
 
@@ -317,6 +322,7 @@ new_state(Opts) ->
         idx_authority = gunner_idx_authority:new(MaxSize),
         counters_ref = counters:new(MaxSize, [atomics]),
         connections = #{},
+        connection_opts = maps:get(connection_opts, Opts, ?DEFAULT_CONNECTION_OPTS),
         cleanup_interval = maps:get(cleanup_interval, Opts, ?DEFAULT_CLEANUP_INTERVAL),
         max_connection_idle_age = maps:get(max_connection_idle_age, Opts, ?DEFAULT_MAX_CONNECTION_IDLE_AGE)
     }.
@@ -481,7 +487,7 @@ open_gun_connection({Host, Port}, Idx, State) ->
 
 -spec get_gun_opts(connection_idx(), state()) -> gun:opts().
 get_gun_opts(Idx, State) ->
-    Opts = genlib_app:env(gunner, client_opts, ?DEFAULT_CLIENT_OPTS),
+    Opts = State#state.connection_opts,
     EventHandler = maps:with([event_handler], Opts),
     Opts#{
         retry => 0,

@@ -32,8 +32,6 @@
 
 -define(COWBOY_HANDLER_MAX_SLEEP_DURATION, 2500).
 
--define(GUNNER_REF(ConnectionPid, StreamRef), {ConnectionPid, StreamRef}).
-
 -spec all() -> [test_case_name() | {group, group_name()}].
 all() ->
     [
@@ -163,7 +161,7 @@ misinformed_client(C) ->
 -spec confused_client(config()) -> test_return().
 confused_client(C) ->
     case gunner:get(?POOL_ID(C), {"localghost", 8080}, <<"/">>) of
-        {error, {resolve_failed, nxdomain}} ->
+        {error, {connection_failed, {shutdown, nxdomain}}} ->
             ok;
         {error, pool_unavailable} ->
             ok
@@ -204,7 +202,7 @@ stop_mock_server() ->
 
 %%
 
--spec await(gunner:gunner_stream_ref(), timeout()) -> {ok, Response :: _} | {error, Reason :: _}.
+-spec await(gunner:stream_ref(), timeout()) -> {ok, Response :: _} | {error, Reason :: _}.
 await(PoolRef, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
     case gunner:await(PoolRef, Timeout) of
