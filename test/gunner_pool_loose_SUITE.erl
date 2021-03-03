@@ -167,7 +167,7 @@ pool_resizing_test(C) ->
 
 get(PoolID, ConnectionArgs, Path, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    {ok, PoolRef} = gunner:get(PoolID, ConnectionArgs, Path, [], #{}, Timeout),
+    {ok, PoolRef} = gunner:get(PoolID, ConnectionArgs, Path, [], #{acquire_timeout => Timeout}),
     TimeoutLeft1 = Deadline - erlang:monotonic_time(millisecond),
     case gunner:await(PoolRef, TimeoutLeft1) of
         {response, nofin, 200, _Headers} ->
