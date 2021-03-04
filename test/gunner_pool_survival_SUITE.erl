@@ -144,7 +144,7 @@ normal_locking_client(C) ->
     case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>) of
         {ok, PoolRef} ->
             {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
-            _ = gunner:free(?POOL_ID(C), PoolRef);
+            ok = gunner:free(?POOL_ID(C), PoolRef);
         {error, pool_unavailable} ->
             ok
     end.

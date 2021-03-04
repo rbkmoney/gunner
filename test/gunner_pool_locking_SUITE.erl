@@ -151,10 +151,6 @@ connection_died_in_use(C) ->
     Counters = get_counters(?POOL_ID(C)),
     {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
     ok = proc_lib:stop(Connection, normal, 1000),
-    ?assertEqual(
-        {error, connection_not_found},
-        gunner_pool:free(?POOL_ID(C), Connection, 1000)
-    ),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, busy_down]).
 
 -spec connection_died_in_pool(config()) -> test_return().
@@ -200,11 +196,8 @@ cant_free_multiple_times(C) ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
         {ok, _Connection2} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
-        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1, 1000)),
-        ?assertEqual(
-            {error, connection_not_locked},
-            gunner_pool:free(?POOL_ID(C), Connection1, 1000)
-        ),
+        ok = gunner_pool:free(?POOL_ID(C), Connection1, 1000),
+        ok = gunner_pool:free(?POOL_ID(C), Connection1, 1000),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, free])
     end),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, {free, 2}]).
@@ -224,17 +217,11 @@ strict_connection_ownership_test(C) ->
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
     ?assertNotEqual(Connection1, Connection2),
     ok = client_process_persistent(client1, fun() ->
-        ?assertEqual(
-            {error, connection_not_locked},
-            gunner_pool:free(?POOL_ID(C), Connection2, 1000)
-        ),
+        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection2, 1000)),
         {return, ok}
     end),
     ok = client_process_persistent(client2, fun() ->
-        ?assertEqual(
-            {error, connection_not_locked},
-            gunner_pool:free(?POOL_ID(C), Connection1, 1000)
-        ),
+        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1, 1000)),
         {return, ok}
     end),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),

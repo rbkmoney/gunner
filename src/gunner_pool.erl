@@ -159,7 +159,7 @@
 
 %%
 
--define(DEFAULT_CONNECTION_OPTS, #{connect_timeout => 5000}).
+-define(DEFAULT_CONNECTION_OPTS, #{}).
 
 -define(DEFAULT_MODE, loose).
 
@@ -218,9 +218,7 @@ start_link(PoolRegName, PoolOpts) ->
 acquire(PoolID, Endpoint, Timeout) ->
     call_pool(PoolID, {acquire, Endpoint}, Timeout).
 
--spec free(pool_id(), connection_pid(), timeout()) ->
-    ok |
-    {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
+-spec free(pool_id(), connection_pid(), timeout()) -> ok.
 free(PoolID, ConnectionPid, Timeout) ->
     call_pool(PoolID, {free, ConnectionPid}, Timeout).
 
@@ -255,8 +253,7 @@ init([PoolOpts]) ->
         {noreply, state()} |
         {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
             state()};
-    ({free, connection_pid()}, from(), state()) ->
-        {reply, ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}, state()};
+    ({free, connection_pid()}, from(), state()) -> {noreply, state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
 handle_call({acquire, Endpoint}, From, State) ->
@@ -269,11 +266,12 @@ handle_call({acquire, Endpoint}, From, State) ->
             {reply, {error, Reason}, State}
     end;
 handle_call({free, ConnectionPid}, From, State) ->
+    _ = gen_server:reply(From, ok),
     case handle_free_connection(ConnectionPid, From, State) of
+        ok ->
+            {noreply, State};
         {ok, NewState} ->
-            {reply, ok, NewState};
-        {error, Reason} ->
-            {reply, {error, Reason}, State}
+            {noreply, NewState}
     end;
 handle_call(pool_status, _From, State) ->
     {reply, {ok, create_pool_status_response(State)}, State};
@@ -397,21 +395,17 @@ get_connection_load(Idx, State) ->
 
 %%
 
--spec handle_free_connection(connection_pid(), requester(), state()) -> {Result, state()} | Error when
-    Result :: ok,
-    Error :: {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
+-spec handle_free_connection(connection_pid(), requester(), state()) -> ok | {ok, state()}.
 handle_free_connection(_ConnectionPid, _From, #state{mode = loose}) ->
-    {error, {invalid_pool_mode, loose}};
+    ok;
 handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mode = locking}) ->
     case get_connection_state(ConnectionPid, State) of
         #connection_state{status = up, lock = {locked, ClientPid}} = ConnSt ->
             ConnSt1 = reset_connection_idle(ConnSt),
             State1 = set_connection_state(ConnectionPid, ConnSt1, State),
             {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
-        #connection_state{} ->
-            {error, connection_not_locked};
-        undefined ->
-            {error, connection_not_found}
+        _ ->
+            ok
     end.
 
 %%
