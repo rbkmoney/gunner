@@ -1,4 +1,4 @@
--module(gunner_pool_locking_SUITE).
+-module(gunner_pool_general_SUITE).
 
 -include_lib("stdlib/include/assert.hrl").
 
@@ -134,7 +134,7 @@ acquire_free_ok_test(C) ->
     %% Initial connection creation
     {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire]),
-    ok = gunner_pool:free(?POOL_ID(C), Connection, 1000),
+    ok = gunner_pool:free(?POOL_ID(C), Connection),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, free]).
 
 -spec failed_connection_test(config()) -> test_return().
@@ -157,7 +157,7 @@ connection_died_in_use(C) ->
 connection_died_in_pool(C) ->
     Counters = get_counters(?POOL_ID(C)),
     {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
-    ok = gunner_pool:free(?POOL_ID(C), Connection, 1000),
+    ok = gunner_pool:free(?POOL_ID(C), Connection),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, free]),
     ok = proc_lib:stop(Connection, normal, 1000),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, free, free_down]).
@@ -169,8 +169,8 @@ connection_uniqueness_test(C) ->
     {ok, Connection2} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
     ?assertNotEqual(Connection1, Connection2),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
-    ok = gunner_pool:free(?POOL_ID(C), Connection2, 1000),
-    ok = gunner_pool:free(?POOL_ID(C), Connection1, 1000),
+    ok = gunner_pool:free(?POOL_ID(C), Connection2),
+    ok = gunner_pool:free(?POOL_ID(C), Connection1),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, {free, 2}]).
 
 -spec connection_reuse_test(config()) -> test_return().
@@ -181,7 +181,7 @@ connection_reuse_test(C) ->
         {ok, Connection2} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
         ?assertNotEqual(Connection1, Connection2),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
-        ok = gunner_pool:free(?POOL_ID(C), Connection2, 1000),
+        ok = gunner_pool:free(?POOL_ID(C), Connection2),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, free]),
         {ok, Connection3} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
         ?assertEqual(Connection3, Connection2),
@@ -196,8 +196,8 @@ cant_free_multiple_times(C) ->
         {ok, Connection1} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
         {ok, _Connection2} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
-        ok = gunner_pool:free(?POOL_ID(C), Connection1, 1000),
-        ok = gunner_pool:free(?POOL_ID(C), Connection1, 1000),
+        ok = gunner_pool:free(?POOL_ID(C), Connection1),
+        ok = gunner_pool:free(?POOL_ID(C), Connection1),
         ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, free])
     end),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, {free, 2}]).
@@ -217,20 +217,20 @@ strict_connection_ownership_test(C) ->
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
     ?assertNotEqual(Connection1, Connection2),
     ok = client_process_persistent(client1, fun() ->
-        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection2, 1000)),
+        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection2)),
         {return, ok}
     end),
     ok = client_process_persistent(client2, fun() ->
-        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1, 1000)),
+        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1)),
         {return, ok}
     end),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}]),
     ok = client_process_persistent(client1, fun() ->
-        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1, 1000)),
+        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection1)),
         {exit, ok}
     end),
     ok = client_process_persistent(client2, fun() ->
-        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection2, 1000)),
+        ?assertEqual(ok, gunner_pool:free(?POOL_ID(C), Connection2)),
         {exit, ok}
     end),
     ok = assert_counters(?POOL_ID(C), Counters, [{acquire, 2}, {free, 2}]).
@@ -292,7 +292,7 @@ free_connections([], _PoolID) ->
     ok;
 free_connections([{ClientID, Connection} | Rest], PoolID) ->
     Result = client_process_persistent(ClientID, fun() ->
-        Result0 = gunner_pool:free(PoolID, Connection, 1000),
+        Result0 = gunner_pool:free(PoolID, Connection),
         {exit, Result0}
     end),
     case Result of
@@ -320,11 +320,11 @@ pool_group_isolation_test(C) ->
     Counters = get_counters(?POOL_ID(C)),
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
-        ok = gunner_pool:free(?POOL_ID(C), Connection, 1000)
+        ok = gunner_pool:free(?POOL_ID(C), Connection)
     end),
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8088}, 1000),
-        ok = gunner_pool:free(?POOL_ID(C), Connection, 1000)
+        ok = gunner_pool:free(?POOL_ID(C), Connection)
     end),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, acquire, free, free]).
 
@@ -334,15 +334,15 @@ pool_group_shared_free_limit_test(C) ->
     %% This test relies on MIN_CONNECTIONS being 2
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8080}, 1000),
-        ok = gunner_pool:free(?POOL_ID(C), Connection, 1000)
+        ok = gunner_pool:free(?POOL_ID(C), Connection)
     end),
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8088}, 1000),
-        ok = gunner_pool:free(?POOL_ID(C), Connection, 1000)
+        ok = gunner_pool:free(?POOL_ID(C), Connection)
     end),
     ok = client_process(fun() ->
         {ok, Connection} = gunner_pool:acquire(?POOL_ID(C), {"localhost", 8089}, 1000),
-        ok = gunner_pool:free(?POOL_ID(C), Connection, 1000)
+        ok = gunner_pool:free(?POOL_ID(C), Connection)
     end),
     _ = wait_pool_cleanup(),
     ok = assert_counters(?POOL_ID(C), Counters, [acquire, acquire, acquire, free, free, free]),

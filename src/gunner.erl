@@ -35,7 +35,6 @@
 %% API Locking mode functions
 
 -export([free/2]).
--export([free/3]).
 
 %% Application callbacks
 
@@ -178,15 +177,9 @@ request(PoolID, Endpoint, Method, Path, Headers, Body, Opts) ->
 
 %%
 
--spec free(pool_id(), stream_ref()) ->
-    ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
-free(PoolID, GStreamRef) ->
-    free(PoolID, GStreamRef, ?DEFAULT_TIMEOUT).
-
--spec free(pool_id(), stream_ref(), timeout()) ->
-    ok | {error, {invalid_pool_mode, loose} | connection_not_locked | connection_not_found}.
-free(PoolID, {ConnectionPid, _}, Timeout) ->
-    gunner_pool:free(PoolID, ConnectionPid, Timeout).
+-spec free(pool_id(), stream_ref()) -> ok.
+free(PoolID, {ConnectionPid, _}) ->
+    gunner_pool:free(PoolID, ConnectionPid).
 
 %%
 

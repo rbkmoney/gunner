@@ -10,7 +10,7 @@
 -export([pool_status/2]).
 
 -export([acquire/3]).
--export([free/3]).
+-export([free/2]).
 
 %% Gen Server callbacks
 
@@ -136,7 +136,7 @@
 -type connection_state() :: #connection_state{}.
 
 -type connection_status() :: {starting, requester()} | up | down.
--type connection_lock() :: unlocked | {locked, Owner :: pid()}.
+-type connection_lock() :: unlocked | {locked, Owner :: client_pid()}.
 -type connection_idx() :: gunner_idx_authority:idx().
 
 -type endpoint() :: gunner:endpoint().
@@ -218,9 +218,9 @@ start_link(PoolRegName, PoolOpts) ->
 acquire(PoolID, Endpoint, Timeout) ->
     call_pool(PoolID, {acquire, Endpoint}, Timeout).
 
--spec free(pool_id(), connection_pid(), timeout()) -> ok.
-free(PoolID, ConnectionPid, Timeout) ->
-    call_pool(PoolID, {free, ConnectionPid}, Timeout).
+-spec free(pool_id(), connection_pid()) -> ok.
+free(PoolID, ConnectionPid) ->
+    gen_server:cast(PoolID, {free, ConnectionPid, self()}).
 
 -spec pool_status(pool_id(), timeout()) -> {ok, pool_status_response()} | {error, pool_not_found}.
 pool_status(PoolID, Timeout) ->
@@ -253,7 +253,6 @@ init([PoolOpts]) ->
         {noreply, state()} |
         {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
             state()};
-    ({free, connection_pid()}, from(), state()) -> {noreply, state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 %%(Any :: _, from(), state()) -> no_return().
 handle_call({acquire, Endpoint}, From, State) ->
@@ -265,20 +264,15 @@ handle_call({acquire, Endpoint}, From, State) ->
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
-handle_call({free, ConnectionPid}, From, State) ->
-    _ = gen_server:reply(From, ok),
-    case handle_free_connection(ConnectionPid, From, State) of
-        ok ->
-            {noreply, State};
-        {ok, NewState} ->
-            {noreply, NewState}
-    end;
 handle_call(pool_status, _From, State) ->
     {reply, {ok, create_pool_status_response(State)}, State};
 handle_call(_Call, _From, _St) ->
     erlang:error(unexpected_call).
 
--spec handle_cast(any(), state()) -> {noreply, state()}.
+-spec handle_cast({free, connection_pid(), client_pid()}, state()) -> {noreply, state()}.
+%%(Any :: _, from(), state()) -> no_return().
+handle_cast({free, ConnectionPid, ClientPid}, State) ->
+    {noreply, handle_free_connection(ConnectionPid, ClientPid, State)};
 handle_cast(_Cast, St) ->
     {noreply, St}.
 
@@ -395,17 +389,17 @@ get_connection_load(Idx, State) ->
 
 %%
 
--spec handle_free_connection(connection_pid(), requester(), state()) -> ok | {ok, state()}.
-handle_free_connection(_ConnectionPid, _From, #state{mode = loose}) ->
-    ok;
-handle_free_connection(ConnectionPid, {ClientPid, _} = _From, State = #state{mode = locking}) ->
+-spec handle_free_connection(connection_pid(), client_pid(), state()) -> state().
+handle_free_connection(_ConnectionPid, _ClientPid, #state{mode = loose} = State) ->
+    State;
+handle_free_connection(ConnectionPid, ClientPid, #state{mode = locking} = State) ->
     case get_connection_state(ConnectionPid, State) of
         #connection_state{status = up, lock = {locked, ClientPid}} = ConnSt ->
             ConnSt1 = reset_connection_idle(ConnSt),
             State1 = set_connection_state(ConnectionPid, ConnSt1, State),
-            {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
+            unlock_connection(ConnectionPid, ClientPid, State1);
         _ ->
-            ok
+            State
     end.
 
 %%
