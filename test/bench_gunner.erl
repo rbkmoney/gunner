@@ -31,7 +31,7 @@ gunner_pool_loose({stop, State}) ->
 
 -spec bench_gunner_pool_loose(_, _) -> _.
 bench_gunner_pool_loose(PoolID, _) ->
-    {ok, _} = gunner:get(PoolID, valid_host(), <<"/">>).
+    {ok, _, _, _} = gunner:get(PoolID, valid_host(), <<"/">>).
 
 %%
 
@@ -55,8 +55,11 @@ gunner_pool_locking({stop, State}) ->
 
 -spec bench_gunner_pool_locking(_, _) -> _.
 bench_gunner_pool_locking(PoolID, _) ->
-    {ok, StreamRef} = gunner:get(PoolID, valid_host(), <<"/">>),
-    _ = gunner:free(PoolID, StreamRef).
+    gunner:transaction(PoolID, valid_host(), #{}, fun(ConnectionPid) ->
+        StreamRef = gun:request(ConnectionPid, <<"GET">>, <<"/">>, [], <<>>, #{}),
+        {ok, <<"ok">>} = await(ConnectionPid, StreamRef, 1000),
+        ok
+    end).
 
 %%
 
@@ -88,3 +91,23 @@ valid_host() ->
         {"localhost", 8087}
     ],
     lists:nth(rand:uniform(length(Hosts)), Hosts).
+
+-spec await(pid(), gun:stream_ref(), timeout()) -> {ok, Response :: _} | {error, Reason :: _}.
+await(ConnectionPid, StreamRef, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    case gun:await(ConnectionPid, StreamRef, Timeout) of
+        {response, nofin, 200, _Headers} ->
+            TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
+            case gun:await_body(ConnectionPid, StreamRef, TimeoutLeft) of
+                {ok, Response, _Trailers} ->
+                    {ok, Response};
+                {ok, Response} ->
+                    {ok, Response};
+                {error, Reason} ->
+                    {error, {unknown, Reason}}
+            end;
+        {response, fin, 404, _Headers} ->
+            {error, notfound};
+        {error, Reason} ->
+            {error, {unknown, Reason}}
+    end.

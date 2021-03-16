@@ -7,9 +7,7 @@ run() ->
     Opts = #{iterations => 100},
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
     _ = start_mock_server(),
-    {ok, Pid} = gunner:start_pool(#{
-        mode => locking
-    }),
+    {ok, Pid} = gunner:start_pool(#{}),
     _ = run(gunner, mk_gunner_runner(Pid), Opts#{target_process => Pid}),
     ok = gunner:stop_pool(Pid),
     _ = stop_mock_server(),
@@ -54,7 +52,7 @@ run(Name, Runner, Opts) ->
 -spec mk_gunner_runner(pid()) -> meter_memory_pressure:runner().
 mk_gunner_runner(PoolID) ->
     fun() ->
-        case gunner_pool:acquire(PoolID, {"localhost", 8080}, 1000) of
+        case gunner_pool:acquire(PoolID, {"localhost", 8080}, true, 1000) of
             {ok, Connection} ->
                 ok = gunner_pool:free(PoolID, Connection);
             {error, pool_unavailable} ->

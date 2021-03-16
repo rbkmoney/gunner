@@ -1,4 +1,4 @@
--module(gunner_pool_survival_SUITE).
+-module(gunner_survival_SUITE).
 
 -include_lib("stdlib/include/assert.hrl").
 
@@ -73,7 +73,6 @@ init_per_group(survival, C) ->
     C ++ [{?POOL_ID_PROP, Pid}];
 init_per_group(survival_locking, C) ->
     {ok, Pid} = gunner:start_pool(#{
-        mode => locking,
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_load => ?POOL_MAX_CONNECTION_LOAD,
         max_connection_idle_age => ?POOL_MAX_CONNECTION_IDLE_AGE,
@@ -131,9 +130,10 @@ make_testcase_list([{CaseName, Percent} | Rest], TotalTests, Acc) ->
 -spec normal_client(config()) -> test_return().
 normal_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>) of
-        {ok, PoolRef} ->
-            {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2);
+    Opts = #{request_timeout => ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2},
+    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>, [], Opts) of
+        {ok, 200, _, <<"ok/", Tag/binary>>} ->
+            ok;
         {error, pool_unavailable} ->
             ok
     end.
@@ -141,10 +141,15 @@ normal_client(C) ->
 -spec normal_locking_client(config()) -> test_return().
 normal_locking_client(C) ->
     Tag = list_to_binary(integer_to_list(erlang:unique_integer())),
-    case gunner:get(?POOL_ID(C), valid_host(), <<"/", Tag/binary>>) of
-        {ok, PoolRef} ->
-            {ok, <<"ok/", Tag/binary>>} = await(PoolRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
-            ok = gunner:free(?POOL_ID(C), PoolRef);
+    case
+        gunner:transaction(?POOL_ID(C), valid_host(), #{}, fun(ConnectionPid) ->
+            StreamRef = gun:request(ConnectionPid, <<"GET">>, <<"/", Tag/binary>>, [], <<>>, #{}),
+            {ok, <<"ok/", Tag/binary>>} = await(ConnectionPid, StreamRef, ?COWBOY_HANDLER_MAX_SLEEP_DURATION * 2),
+            ok
+        end)
+    of
+        {ok, ok} ->
+            ok;
         {error, pool_unavailable} ->
             ok
     end.
@@ -202,13 +207,13 @@ stop_mock_server() ->
 
 %%
 
--spec await(gunner:stream_ref(), timeout()) -> {ok, Response :: _} | {error, Reason :: _}.
-await(PoolRef, Timeout) ->
+-spec await(pid(), gun:stream_ref(), timeout()) -> {ok, Response :: _} | {error, Reason :: _}.
+await(ConnectionPid, StreamRef, Timeout) ->
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
-    case gunner:await(PoolRef, Timeout) of
+    case gun:await(ConnectionPid, StreamRef, Timeout) of
         {response, nofin, 200, _Headers} ->
             TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
-            case gunner:await_body(PoolRef, TimeoutLeft) of
+            case gun:await_body(ConnectionPid, StreamRef, TimeoutLeft) of
                 {ok, Response, _Trailers} ->
                     {ok, Response};
                 {ok, Response} ->

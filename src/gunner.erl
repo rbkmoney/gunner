@@ -12,7 +12,7 @@
 -export([pool_status/1]).
 -export([pool_status/2]).
 
-%% API Request wrappers
+%% API Syncronious requests
 
 -export([get/3]).
 -export([get/4]).
@@ -24,17 +24,9 @@
 
 -export([request/7]).
 
-%% API Await wrappers
+%% API Locking transaction
 
--export([await/1]).
--export([await/2]).
-
--export([await_body/1]).
--export([await_body/2]).
-
-%% API Locking mode functions
-
--export([free/2]).
+-export([transaction/4]).
 
 %% Application callbacks
 
@@ -55,12 +47,20 @@
 
 -type opts() :: #{
     req_opts => gun:req_opts(),
-    acquire_timeout => timeout()
+    acquire_timeout => timeout(),
+    request_timeout => timeout()
 }.
 
--opaque stream_ref() :: {connection_pid(), gun:stream_ref()}.
+-type response() ::
+    {ok, http_code(), response_headers(), response_body()} |
+    {error, http_code(), response_headers()} |
+    {error, {unknown, _}}.
 
--type request_error() :: gunner_pool:acquire_error().
+-type http_code() :: 200..599.
+-type response_headers() :: [{binary(), binary()}].
+-type response_body() :: binary().
+
+-type acquire_error() :: gunner_pool:acquire_error().
 
 -export_type([pool/0]).
 -export_type([pool_id/0]).
@@ -69,9 +69,13 @@
 -export_type([end_port/0]).
 -export_type([endpoint/0]).
 -export_type([opts/0]).
--export_type([stream_ref/0]).
 
--export_type([request_error/0]).
+-export_type([response/0]).
+-export_type([http_code/0]).
+-export_type([response_headers/0]).
+-export_type([response_body/0]).
+
+-export_type([acquire_error/0]).
 
 %% Internal types
 
@@ -84,29 +88,8 @@
 
 -type connection_pid() :: gunner_pool:connection_pid().
 
--type request_return() :: {ok, stream_ref()} | {error, request_error()}.
-
-%% Copypasted from gun.erl
--type resp_headers() :: [{binary(), binary()}].
--type await_result() ::
-    {inform, 100..199, resp_headers()} |
-    {response, fin | nofin, non_neg_integer(), resp_headers()} |
-    {data, fin | nofin, binary()} |
-    {sse, cow_sse:event() | fin} |
-    {trailers, resp_headers()} |
-    {push, gun:stream_ref(), binary(), binary(), resp_headers()} |
-    {upgrade, [binary()], resp_headers()} |
-    {ws, gun:ws_frame()} |
-    {up, http | http2 | raw | socks} |
-    {notify, settings_changed, map()} |
-    {error, {stream_error | connection_error | down, any()} | timeout}.
-
--type await_body_result() ::
-    {ok, binary()} |
-    {ok, binary(), resp_headers()} |
-    {error, {stream_error | connection_error | down, any()} | timeout}.
-
-%%
+-type transaction_fun() :: fun((connection_pid()) -> transaction_fun_return()).
+-type transaction_fun_return() :: any().
 
 -define(DEFAULT_TIMEOUT, 1000).
 
@@ -136,68 +119,63 @@ pool_status(PoolID, Timeout) ->
 
 %%
 
--spec get(pool_id(), endpoint(), path()) -> request_return().
+-spec get(pool_id(), endpoint(), path()) -> response() | {error, acquire_error()}.
 get(PoolID, Endpoint, Path) ->
     get(PoolID, Endpoint, Path, []).
 
--spec get(pool_id(), endpoint(), path(), req_headers()) -> request_return().
+-spec get(pool_id(), endpoint(), path(), req_headers()) -> response() | {error, acquire_error()}.
 get(PoolID, Endpoint, Path, Headers) ->
     get(PoolID, Endpoint, Path, Headers, #{}).
 
--spec get(pool_id(), endpoint(), path(), req_headers(), opts()) -> request_return().
+-spec get(pool_id(), endpoint(), path(), req_headers(), opts()) -> response() | {error, acquire_error()}.
 get(PoolID, Endpoint, Path, Headers, Opts) ->
     request(PoolID, Endpoint, <<"GET">>, Path, Headers, <<>>, Opts).
 
 %%
 
--spec post(pool_id(), endpoint(), path(), body()) -> request_return().
+-spec post(pool_id(), endpoint(), path(), body()) -> response() | {error, acquire_error()}.
 post(PoolID, Endpoint, Path, Body) ->
     post(PoolID, Endpoint, Path, Body, []).
 
--spec post(pool_id(), endpoint(), path(), body(), req_headers()) -> request_return().
+-spec post(pool_id(), endpoint(), path(), body(), req_headers()) -> response() | {error, acquire_error()}.
 post(PoolID, Endpoint, Path, Body, Headers) ->
     post(PoolID, Endpoint, Path, Body, Headers, #{}).
 
--spec post(pool_id(), endpoint(), path(), body(), req_headers(), opts()) -> request_return().
+-spec post(pool_id(), endpoint(), path(), body(), req_headers(), opts()) -> response() | {error, acquire_error()}.
 post(PoolID, Endpoint, Path, Body, Headers, Opts) ->
     request(PoolID, Endpoint, <<"POST">>, Path, Headers, Body, Opts).
 
 %%
 
--spec request(pool_id(), endpoint(), method(), path(), req_headers(), body(), opts()) -> request_return().
+-spec request(pool_id(), endpoint(), method(), path(), req_headers(), body(), opts()) ->
+    response() | {error, acquire_error()}.
 request(PoolID, Endpoint, Method, Path, Headers, Body, Opts) ->
     Timeout = maps:get(acquire_timeout, Opts, ?DEFAULT_TIMEOUT),
-    case gunner_pool:acquire(PoolID, Endpoint, Timeout) of
+    case gunner_pool:acquire(PoolID, Endpoint, false, Timeout) of
         {ok, ConnectionPid} ->
             StreamRef = gun:request(ConnectionPid, Method, Path, Headers, Body, maps:get(req_opts, Opts, #{})),
-            {ok, {ConnectionPid, StreamRef}};
+            await_response(ConnectionPid, StreamRef, Opts);
         {error, _} = Error ->
             Error
     end.
 
 %%
 
--spec free(pool_id(), stream_ref()) -> ok.
-free(PoolID, {ConnectionPid, _}) ->
-    gunner_pool:free(PoolID, ConnectionPid).
-
-%%
-
--spec await(stream_ref()) -> await_result().
-await({ConnPid, StreamRef}) ->
-    gun:await(ConnPid, StreamRef).
-
--spec await(stream_ref(), timeout()) -> await_result().
-await({ConnPid, StreamRef}, Timeout) ->
-    gun:await(ConnPid, StreamRef, Timeout).
-
--spec await_body(stream_ref()) -> await_body_result().
-await_body({ConnPid, StreamRef}) ->
-    gun:await_body(ConnPid, StreamRef).
-
--spec await_body(stream_ref(), timeout()) -> await_body_result().
-await_body({ConnPid, StreamRef}, Timeout) ->
-    gun:await_body(ConnPid, StreamRef, Timeout).
+-spec transaction(pool_id(), endpoint(), opts(), transaction_fun()) ->
+    {ok, transaction_fun_return()} | {error, acquire_error()}.
+transaction(PoolID, Endpoint, Opts, Fun) ->
+    Timeout = maps:get(acquire_timeout, Opts, ?DEFAULT_TIMEOUT),
+    case gunner_pool:acquire(PoolID, Endpoint, true, Timeout) of
+        {ok, ConnectionPid} ->
+            try
+                Result = Fun(ConnectionPid),
+                {ok, Result}
+            after
+                ok = gunner_pool:free(PoolID, ConnectionPid)
+            end;
+        {error, _} = Error ->
+            Error
+    end.
 
 %%
 %% Application callbacks
@@ -210,3 +188,27 @@ start(_StartType, _StartArgs) ->
 -spec stop(any()) -> ok.
 stop(_State) ->
     ok.
+
+%% Internal functions
+
+await_response(ConnectionPid, StreamRef, Opts) ->
+    Timeout = maps:get(request_timeout, Opts, ?DEFAULT_TIMEOUT),
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    case gun:await(ConnectionPid, StreamRef, Timeout) of
+        {response, nofin, Code, Headers} when Code >= 200, Code =< 299 ->
+            TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
+            case gun:await_body(ConnectionPid, StreamRef, TimeoutLeft) of
+                {ok, Body, _Trailers} ->
+                    {ok, Code, Headers, Body};
+                {ok, Body} ->
+                    {ok, Code, Headers, Body};
+                {error, Reason} ->
+                    {error, {unknown, Reason}}
+            end;
+        {response, fin, Code, Headers} when Code >= 200, Code =< 299 ->
+            {ok, Code, Headers, <<>>};
+        {response, _, Code, Headers} when Code >= 300, Code =< 599 ->
+            {error, Code, Headers};
+        {error, Reason} ->
+            {error, {unknown, Reason}}
+    end.

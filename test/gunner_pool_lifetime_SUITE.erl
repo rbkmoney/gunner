@@ -1,4 +1,4 @@
--module(gunner_pool_SUITE).
+-module(gunner_pool_lifetime_SUITE).
 
 -include_lib("stdlib/include/assert.hrl").
 
