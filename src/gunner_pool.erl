@@ -267,11 +267,11 @@ handle_call(_Call, _From, _St) ->
     erlang:error(unexpected_call).
 
 -spec handle_cast({free, connection_pid(), client_pid()}, state()) -> {noreply, state()}.
-%%(Any :: _, from(), state()) -> no_return().
+%%(Any :: _, state()) -> no_return().
 handle_cast({free, ConnectionPid, ClientPid}, State) ->
     {noreply, handle_free_connection(ConnectionPid, ClientPid, State)};
-handle_cast(_Cast, St) ->
-    {noreply, St}.
+handle_cast(_Cast, _St) ->
+    erlang:error(unexpected_cast).
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info(?GUNNER_CLEANUP(), State) ->

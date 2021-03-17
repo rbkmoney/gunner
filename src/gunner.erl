@@ -12,7 +12,7 @@
 -export([pool_status/1]).
 -export([pool_status/2]).
 
-%% API Syncronious requests
+%% API Synchronous requests
 
 -export([get/3]).
 -export([get/4]).
@@ -52,8 +52,7 @@
 }.
 
 -type response() ::
-    {ok, http_code(), response_headers(), response_body()} |
-    {error, http_code(), response_headers()} |
+    {ok, http_code(), response_headers(), response_body() | undefined} |
     {error, {unknown, _}}.
 
 -type http_code() :: 200..599.
@@ -195,7 +194,7 @@ await_response(ConnectionPid, StreamRef, Opts) ->
     Timeout = maps:get(request_timeout, Opts, ?DEFAULT_TIMEOUT),
     Deadline = erlang:monotonic_time(millisecond) + Timeout,
     case gun:await(ConnectionPid, StreamRef, Timeout) of
-        {response, nofin, Code, Headers} when Code >= 200, Code =< 299 ->
+        {response, nofin, Code, Headers} ->
             TimeoutLeft = Deadline - erlang:monotonic_time(millisecond),
             case gun:await_body(ConnectionPid, StreamRef, TimeoutLeft) of
                 {ok, Body, _Trailers} ->
@@ -205,10 +204,8 @@ await_response(ConnectionPid, StreamRef, Opts) ->
                 {error, Reason} ->
                     {error, {unknown, Reason}}
             end;
-        {response, fin, Code, Headers} when Code >= 200, Code =< 299 ->
-            {ok, Code, Headers, <<>>};
-        {response, _, Code, Headers} when Code >= 300, Code =< 599 ->
-            {error, Code, Headers};
+        {response, fin, Code, Headers} ->
+            {ok, Code, Headers, undefined};
         {error, Reason} ->
             {error, {unknown, Reason}}
     end.
