@@ -152,8 +152,6 @@
 
 -define(DEFAULT_CONNECTION_OPTS, #{}).
 
--define(DEFAULT_MODE, loose).
-
 -define(DEFAULT_MAX_CONNECTION_LOAD, 1).
 -define(DEFAULT_MAX_CONNECTION_IDLE_AGE, 5).
 
@@ -251,7 +249,6 @@ init([PoolOpts]) ->
         {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
             state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
-%%(Any :: _, from(), state()) -> no_return().
 handle_call({acquire, Endpoint, Locking}, From, State) ->
     case handle_acquire_connection(Endpoint, Locking, From, State) of
         {{ok, {connection, Connection}}, NewState} ->
@@ -262,16 +259,11 @@ handle_call({acquire, Endpoint, Locking}, From, State) ->
             {reply, {error, Reason}, State}
     end;
 handle_call(pool_status, _From, State) ->
-    {reply, {ok, create_pool_status_response(State)}, State};
-handle_call(_Call, _From, _St) ->
-    erlang:error(unexpected_call).
+    {reply, {ok, create_pool_status_response(State)}, State}.
 
 -spec handle_cast({free, connection_pid(), client_pid()}, state()) -> {noreply, state()}.
-%%(Any :: _, state()) -> no_return().
 handle_cast({free, ConnectionPid, ClientPid}, State) ->
-    {noreply, handle_free_connection(ConnectionPid, ClientPid, State)};
-handle_cast(_Cast, _St) ->
-    erlang:error(unexpected_cast).
+    {noreply, handle_free_connection(ConnectionPid, ClientPid, State)}.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
 handle_info(?GUNNER_CLEANUP(), State) ->

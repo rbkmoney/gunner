@@ -87,8 +87,7 @@
 
 -type connection_pid() :: gunner_pool:connection_pid().
 
--type transaction_fun() :: fun((connection_pid()) -> transaction_fun_return()).
--type transaction_fun_return() :: any().
+-type transaction_fun(Ret) :: fun((connection_pid()) -> Ret).
 
 -define(DEFAULT_TIMEOUT, 1000).
 
@@ -160,8 +159,7 @@ request(PoolID, Endpoint, Method, Path, Headers, Body, Opts) ->
 
 %%
 
--spec transaction(pool_id(), endpoint(), opts(), transaction_fun()) ->
-    {ok, transaction_fun_return()} | {error, acquire_error()}.
+-spec transaction(pool_id(), endpoint(), opts(), transaction_fun(Ret)) -> {ok, Ret} | {error, acquire_error()}.
 transaction(PoolID, Endpoint, Opts, Fun) ->
     Timeout = maps:get(acquire_timeout, Opts, ?DEFAULT_TIMEOUT),
     case gunner_pool:acquire(PoolID, Endpoint, true, Timeout) of
