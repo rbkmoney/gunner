@@ -280,9 +280,7 @@ handle_info(?DOWN(Mref, ClientPid, Reason), State) ->
     {noreply, State1};
 handle_info(?EXIT(ConnectionPid, Reason), State) ->
     State1 = handle_connection_down(ConnectionPid, Reason, State),
-    {noreply, State1};
-handle_info(_, _St0) ->
-    erlang:error(unexpected_info).
+    {noreply, State1}.
 
 -spec terminate(any(), state()) -> ok.
 terminate(_, _St) ->
