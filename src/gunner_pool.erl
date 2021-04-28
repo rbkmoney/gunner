@@ -265,7 +265,7 @@ handle_call({acquire, Endpoint, Locking}, From, State0) ->
     State1 = handle_acquire_started_event(GroupID, From, Locking, State0),
     case handle_acquire_connection(Endpoint, GroupID, Locking, From, State1) of
         {{ok, {connection, Connection}}, NewState} ->
-            NewState1 = handle_acquire_finished_event({success, {existing, Connection}}, NewState),
+            NewState1 = handle_acquire_finished_event({success, Connection}, NewState),
             {reply, {ok, Connection}, NewState1};
         {{ok, connection_started}, NewState} ->
             NewState1 = handle_pool_starvation_event(GroupID, NewState),
@@ -296,10 +296,11 @@ handle_info(?GUNNER_CLEANUP(), State0) ->
     _ = erlang:send_after(State2#state.cleanup_interval, self(), ?GUNNER_CLEANUP()),
     State3 = handle_cleanup_finished_event(State2),
     {noreply, State3};
-handle_info(?GUN_UP(ConnectionPid), State) ->
-    State1 = handle_connection_started(ConnectionPid, State),
-    State2 = handle_acquire_finished_event({success, {new, ConnectionPid}}, State1),
-    {noreply, State2};
+handle_info(?GUN_UP(ConnectionPid), State0) ->
+    State1 = handle_connection_up_event(ConnectionPid, State0),
+    State2 = handle_connection_started(ConnectionPid, State1),
+    State3 = handle_acquire_finished_event({success, ConnectionPid}, State2),
+    {noreply, State3};
 handle_info(?GUN_DOWN(_ConnectionPid, _Reason), State) ->
     {noreply, State};
 handle_info(?DOWN(Mref, ClientPid, Reason), State) ->
@@ -769,11 +770,11 @@ handle_pool_starvation_event(GroupID, State) ->
         State
     ).
 
-handle_acquire_finished_event({success, {Type, ConnectionPid}}, State) ->
+handle_acquire_finished_event({success, ConnectionPid}, State) ->
     ConnSt = get_connection_state(ConnectionPid, State),
     handle_event(
         #gunner_acquire_finished_event{
-            result = {success, Type},
+            result = success,
             connection = ConnectionPid,
             group_id = ConnSt#connection_state.group_id
         },
@@ -826,6 +827,16 @@ handle_client_down_event(ClientPid, Reason, State) ->
         #gunner_client_down_event{
             client = ClientPid,
             reason = Reason
+        },
+        State
+    ).
+
+handle_connection_up_event(ConnectionPid, State) ->
+    ConnState = get_connection_state(ConnectionPid, State),
+    handle_event(
+        #gunner_connection_up_event{
+            connection = ConnectionPid,
+            group_id = ConnState#connection_state.group_id
         },
         State
     ).

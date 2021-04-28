@@ -21,6 +21,7 @@
     cleanup_started_event() |
     cleanup_finished_event() |
     client_down_event() |
+    connection_up_event() |
     connection_down_event() |
     terminate_event().
 
@@ -39,6 +40,7 @@
 -type cleanup_started_event() :: #gunner_cleanup_started_event{}.
 -type cleanup_finished_event() :: #gunner_cleanup_finished_event{}.
 -type client_down_event() :: #gunner_client_down_event{}.
+-type connection_up_event() :: #gunner_connection_up_event{}.
 -type connection_down_event() :: #gunner_connection_down_event{}.
 -type terminate_event() :: #gunner_terminate_event{}.
 
@@ -53,6 +55,7 @@
 -export_type([cleanup_started_event/0]).
 -export_type([cleanup_finished_event/0]).
 -export_type([client_down_event/0]).
+-export_type([connection_up_event/0]).
 -export_type([connection_down_event/0]).
 -export_type([terminate_event/0]).
 

@@ -16,8 +16,7 @@
 }).
 
 -record(gunner_acquire_finished_event, {
-    result :: {success, existing | new} %% There probably is a more elegant way to reperesent this
-        | {fail, pool_unavailable | {failed_to_start_connection, Reason :: _}},
+    result :: success | {fail, pool_unavailable | {failed_to_start_connection, Reason :: _}},
     connection :: gunner_pool:connection_pid() | undefined,
     group_id :: gunner_pool:group_id()
 }).
@@ -43,6 +42,11 @@
 -record(gunner_client_down_event, {
     client :: pid(),
     reason :: any()
+}).
+
+-record(gunner_connection_up_event, {
+    connection :: gunner_pool:connection_pid(),
+    group_id :: gunner_pool:group_id()
 }).
 
 -record(gunner_connection_down_event, {
