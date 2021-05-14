@@ -540,7 +540,11 @@ handle_connection_down(ConnectionPid, Reason, State) ->
 process_connection_removal(ConnState = #connection_state{status = {starting, Requester, _Locking}}, Reason, State) ->
     ok = reply_to_requester({error, {connection_failed, Reason}}, Requester),
     State1 = free_connection_idx(ConnState#connection_state.idx, State),
-    State2 = handle_connection_init_finished_event({error, {connection_failed, Reason}}, ConnState#connection_state.pid, State1),
+    State2 = handle_connection_init_finished_event(
+        {error, {connection_failed, Reason}},
+        ConnState#connection_state.pid,
+        State1
+    ),
     remove_connection(ConnState, dec_starting_count(State2));
 process_connection_removal(ConnState = #connection_state{status = up}, Reason, State) ->
     State1 = handle_connection_down_event({abnormal, Reason}, ConnState#connection_state.pid, State),
