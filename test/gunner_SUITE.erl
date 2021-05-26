@@ -67,10 +67,6 @@ all() ->
         {group, pool_internal}
     ].
 
-%% Basic api working
-%% Connection cleanups working
-%%
-
 -spec groups() -> [{group_name(), list(), [test_case_name()]}].
 groups() ->
     [
@@ -366,7 +362,7 @@ pool_dead_client_test(C) ->
         ?connection_locked(Endpoint, ClientPid, ConnectionPid),
         ?acquire_finished_ok(Endpoint, ClientPid, ConnectionPid),
         ?connection_unlocked(Endpoint, ClientPid, ConnectionPid),
-        ?client_down(ClientPid, _Reason)
+        ?client_down(ClientPid, _)
     ] = wait_events(
         [
             ?EV_MATCH(?acquire_started(Endpoint, ClientPid, true)),
@@ -375,7 +371,7 @@ pool_dead_client_test(C) ->
             ?EV_MATCH(?connection_locked(Endpoint, ClientPid, ConnectionPid)),
             ?EV_MATCH(?acquire_finished_ok(Endpoint, ClientPid, ConnectionPid)),
             ?EV_MATCH(?connection_unlocked(Endpoint, ClientPid, ConnectionPid)),
-            ?EV_MATCH(?client_down(ClientPid, _Reason))
+            ?EV_MATCH(?client_down(ClientPid, _))
         ],
         #{ignore_cleanups => false},
         C
