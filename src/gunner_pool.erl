@@ -9,8 +9,6 @@
 -export([stop_pool/1]).
 -export([start_link/2]).
 
--export([pool_status/2]).
-
 -export([acquire/3]).
 -export([acquire/4]).
 -export([free/2]).
@@ -227,10 +225,6 @@ acquire(PoolID, Endpoint, Locking, Timeout) ->
 free(PoolID, ConnectionPid) ->
     gen_server:cast(PoolID, {free, ConnectionPid, self()}).
 
--spec pool_status(pool_id(), timeout()) -> {ok, pool_status_response()} | {error, pool_not_found}.
-pool_status(PoolID, Timeout) ->
-    call_pool(PoolID, pool_status, Timeout).
-
 %% API helpers
 
 -spec call_pool(pool_id(), Args :: _, timeout()) -> Response :: _ | no_return().
@@ -273,9 +267,7 @@ handle_call({acquire, Endpoint, Locking}, {ClientPid, _} = From, State0) ->
         {error, Reason} ->
             State2 = handle_acquire_finished_event({error, Reason}, ClientPid, State1),
             {reply, {error, Reason}, State2}
-    end;
-handle_call(pool_status, _From, State) ->
-    {reply, {ok, create_pool_status_response(State)}, State}.
+    end.
 
 -spec handle_cast({free, connection_pid(), client_pid()}, state()) -> {noreply, state()}.
 handle_cast({free, ConnectionPid, ClientPid}, State0) ->
@@ -545,7 +537,9 @@ process_connection_removal(ConnState = #connection_state{status = {starting, Req
         ConnState#connection_state.pid,
         State1
     ),
-    remove_connection(ConnState, dec_starting_count(State2));
+    {ClientPid, _} = Requester,
+    State3 = handle_acquire_finished_event({error, {connection_failed, Reason}}, ClientPid, State2),
+    remove_connection(ConnState, dec_starting_count(State3));
 process_connection_removal(ConnState = #connection_state{status = up}, Reason, State) ->
     State1 = handle_connection_down_event({abnormal, Reason}, ConnState#connection_state.pid, State),
     remove_up_connection(ConnState, State1);
@@ -572,14 +566,14 @@ remove_connection(#connection_state{pid = ConnPid}, State) ->
 -spec handle_client_down(client_pid(), mref(), Reason :: _, state()) -> state().
 handle_client_down(ClientPid, Mref, _Reason, State) ->
     #client_state{mref = Mref, connections = Connections} = get_client_state(ClientPid, State),
-    unlock_client_connections(Connections, State).
+    unlock_client_connections(Connections, ClientPid, State).
 
--spec unlock_client_connections([connection_pid()], state()) -> state().
-unlock_client_connections([], State) ->
+-spec unlock_client_connections([connection_pid()], client_pid(), state()) -> state().
+unlock_client_connections([], _ClientPid, State) ->
     State;
-unlock_client_connections([ConnectionPid | Rest], State) ->
-    State1 = do_unlock_connection(ConnectionPid, State),
-    unlock_client_connections(Rest, State1).
+unlock_client_connections([ConnectionPid | Rest], ClientPid, State) ->
+    State1 = do_unlock_connection(ConnectionPid, ClientPid, State),
+    unlock_client_connections(Rest, ClientPid, State1).
 
 %%
 
@@ -646,15 +640,15 @@ do_add_connection_to_client(ConnectionPid, ClientSt = #client_state{connections 
 
 -spec unlock_connection(connection_pid(), client_pid(), state()) -> state().
 unlock_connection(ConnectionPid, ClientPid, State) ->
-    State1 = do_unlock_connection(ConnectionPid, State),
-    State2 = remove_connection_from_client_state(ConnectionPid, ClientPid, State1),
-    handle_connection_unlocked_event(ConnectionPid, ClientPid, State2).
+    State1 = do_unlock_connection(ConnectionPid, ClientPid, State),
+    remove_connection_from_client_state(ConnectionPid, ClientPid, State1).
 
--spec do_unlock_connection(connection_pid(), state()) -> state().
-do_unlock_connection(ConnectionPid, State) ->
+-spec do_unlock_connection(connection_pid(), client_pid(), state()) -> state().
+do_unlock_connection(ConnectionPid, ClientPid, State) ->
     ConnectionSt = get_connection_state(ConnectionPid, State),
     ConnectionSt1 = ConnectionSt#connection_state{status = up, lock = unlocked},
-    set_connection_state(ConnectionPid, ConnectionSt1, State).
+    State1 = set_connection_state(ConnectionPid, ConnectionSt1, State),
+    handle_connection_unlocked_event(ConnectionPid, ClientPid, State1).
 
 -spec remove_connection_from_client_state(connection_pid(), client_pid(), state()) -> state().
 remove_connection_from_client_state(ConnectionPid, ClientPid, State) ->
@@ -732,24 +726,6 @@ dec_starting_count(State) ->
 -spec offset_starting_count(state(), integer()) -> state().
 offset_starting_count(State, Inc) ->
     State#state{starting_count = State#state.starting_count + Inc}.
-
--spec create_pool_status_response(state()) -> pool_status_response().
-create_pool_status_response(State) ->
-    #{
-        total_connections => State#state.active_count + State#state.starting_count,
-        available_connections => get_available_connections_count(State#state.connections)
-    }.
-
--spec get_available_connections_count(connections()) -> size().
-get_available_connections_count(Connections) ->
-    maps:fold(
-        fun
-            (_K, #connection_state{status = up, lock = unlocked}, Acc) -> Acc + 1;
-            (_K, #connection_state{}, Acc) -> Acc
-        end,
-        0,
-        Connections
-    ).
 
 %%
 

@@ -40,7 +40,8 @@ init([]) ->
             id => poolN,
             start => {gunner_pool, start_link, []},
             restart => permanent,
-            shutdown => brutal_kill
+            %@TODO Configurable?
+            shutdown => 1000
         }
     ],
     {ok, {SupFlags, Children}}.

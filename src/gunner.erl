@@ -9,9 +9,6 @@
 -export([start_pool/2]).
 -export([stop_pool/1]).
 
--export([pool_status/1]).
--export([pool_status/2]).
-
 %% API Synchronous requests
 
 -export([get/3]).
@@ -103,17 +100,9 @@ start_pool(PoolOpts) ->
 start_pool(PoolID, PoolOpts) ->
     gunner_pool:start_pool(PoolID, PoolOpts).
 
--spec stop_pool(pool()) -> ok | {error, not_found}.
+-spec stop_pool(pool()) -> ok | {error, pool_not_found}.
 stop_pool(Pool) ->
     gunner_pool:stop_pool(Pool).
-
--spec pool_status(pool_id()) -> {ok, gunner_pool:pool_status_response()} | {error, pool_not_found}.
-pool_status(PoolID) ->
-    pool_status(PoolID, ?DEFAULT_TIMEOUT).
-
--spec pool_status(pool_id(), timeout()) -> {ok, gunner_pool:pool_status_response()} | {error, pool_not_found}.
-pool_status(PoolID, Timeout) ->
-    gunner_pool:pool_status(PoolID, Timeout).
 
 %%
 

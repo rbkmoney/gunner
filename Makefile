@@ -11,7 +11,7 @@ SERVICE_NAME := gunner
 SERVICE_IMAGE_TAG ?= $(shell git rev-parse HEAD)
 
 BUILD_IMAGE_NAME := build-erlang
-BUILD_IMAGE_TAG := c60896ef07d41e7ae2e5f9b6ce845a60ad79acc7
+BUILD_IMAGE_TAG := cc2d319150ec0b9cd23ad9347692a8066616b0f4
 
 CALL_ANYWHERE := \
 	submodules \
