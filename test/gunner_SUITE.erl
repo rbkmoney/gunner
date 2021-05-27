@@ -301,7 +301,20 @@ pool_unavailable_test(C) ->
 -spec pool_cleanup_test(config()) -> test_return().
 pool_cleanup_test(C) ->
     Endpoint = {"localhost", 8080},
-    _Connections = [gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000) || _X <- lists:seq(1, ?POOL_MAX_SIZE)],
+    Connections = [gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000) || _X <- lists:seq(1, ?POOL_MAX_SIZE)],
+    [
+        ?cleanup_started(?POOL_MAX_SIZE),
+        ?cleanup_finished(?POOL_MAX_SIZE)
+    ] = wait_events(
+        [
+            ?EV_MATCH(?cleanup_started(?POOL_MAX_SIZE)),
+            ?EV_MATCH(?cleanup_finished(?POOL_MAX_SIZE))
+        ],
+        #{ignore_cleanups => false},
+        C,
+        ?POOL_CLEANUP_INTERVAL
+    ),
+    _ = [gunner_pool:free(?POOL_PID(C), ConnectionPid) || {ok, ConnectionPid} <- Connections],
     [
         ?cleanup_started(?POOL_MAX_SIZE),
         ?cleanup_finished(?POOL_MIN_SIZE)

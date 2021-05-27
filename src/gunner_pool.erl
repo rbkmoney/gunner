@@ -74,7 +74,7 @@
 -type acquire_error() ::
     pool_not_found |
     pool_unavailable |
-    {failed_to_start_connection | connection_failed, _}.
+    {connection_failed, _}.
 
 -type locking() :: boolean().
 
@@ -251,8 +251,7 @@ init([PoolOpts]) ->
 -spec handle_call
     ({acquire, endpoint(), locking()}, from(), state()) ->
         {noreply, state()} |
-        {reply, {ok, connection_pid()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}},
-            state()};
+        {reply, {ok, connection_pid()} | {error, pool_unavailable | {connection_failed, Reason :: _}}, state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 handle_call({acquire, Endpoint, Locking}, {ClientPid, _} = From, State0) ->
     GroupID = create_group_id(Endpoint),
@@ -271,14 +270,21 @@ handle_call({acquire, Endpoint, Locking}, {ClientPid, _} = From, State0) ->
 
 -spec handle_cast({free, connection_pid(), client_pid()}, state()) -> {noreply, state()}.
 handle_cast({free, ConnectionPid, ClientPid}, State0) ->
-    State1 = handle_free_started_event(ConnectionPid, ClientPid, State0),
-    case handle_free_connection(ConnectionPid, ClientPid, State1) of
-        {ok, NewState} ->
-            NewState1 = handle_free_finished_event(ok, ConnectionPid, ClientPid, NewState),
-            {noreply, NewState1};
-        not_locked ->
-            State2 = handle_free_finished_event({error, not_locked}, ConnectionPid, ClientPid, State1),
-            {noreply, State2}
+    %% Assuming here that the pids we receive are anything close to the ones we
+    %% have in our state is probably not the way to go
+    case get_connection_state(ConnectionPid, State0) of
+        #connection_state{} = ConnSt ->
+            State1 = handle_free_started_event(ConnSt, ClientPid, State0),
+            case handle_free_connection(ConnSt, ClientPid, State1) of
+                {ok, NewState} ->
+                    NewState1 = handle_free_finished_event(ok, ConnSt, ClientPid, NewState),
+                    {noreply, NewState1};
+                not_locked ->
+                    State2 = handle_free_finished_event({error, not_locked}, ConnSt, ClientPid, State1),
+                    {noreply, State2}
+            end;
+        _ ->
+            {noreply, State0}
     end.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
@@ -333,7 +339,7 @@ new_state(Opts) ->
     {Result, state()} | Error
 when
     Result :: {ok, {started | ready, connection_pid()}},
-    Error :: {error, {failed_to_start_connection, _Reason} | pool_unavailable}.
+    Error :: {error, {connection_failed, _Reason} | pool_unavailable}.
 handle_acquire_connection(Endpoint, GroupID, Locking, {ClientPid, _} = From, State) ->
     case acquire_connection_from_group(GroupID, State) of
         {connection, ConnPid, St1} ->
@@ -398,16 +404,14 @@ get_connection_load(Idx, State) ->
 
 %%
 
--spec handle_free_connection(connection_pid(), client_pid(), state()) -> {ok, state()} | not_locked.
-handle_free_connection(ConnectionPid, ClientPid, State) ->
-    case get_connection_state(ConnectionPid, State) of
-        #connection_state{status = up, lock = {locked, ClientPid}} = ConnSt ->
-            ConnSt1 = reset_connection_idle(ConnSt),
-            State1 = set_connection_state(ConnectionPid, ConnSt1, State),
-            {ok, unlock_connection(ConnectionPid, ClientPid, State1)};
-        _ ->
-            not_locked
-    end.
+-spec handle_free_connection(connection_state(), client_pid(), state()) -> {ok, state()} | not_locked.
+handle_free_connection(#connection_state{status = up, lock = {locked, ClientPid}} = ConnSt, ClientPid, State) ->
+    ConnSt1 = reset_connection_idle(ConnSt),
+    ConnPid = ConnSt1#connection_state.pid,
+    State1 = set_connection_state(ConnPid, ConnSt1, State),
+    {ok, unlock_connection(ConnPid, ClientPid, State1)};
+handle_free_connection(_, _ClientPid, _State) ->
+    not_locked.
 
 %%
 
@@ -439,7 +443,7 @@ free_connection_idx(Idx, State) ->
 %%
 
 -spec handle_connection_creation(group_id(), endpoint(), requester(), locking(), state()) ->
-    {ok, connection_pid(), state()} | {error, pool_unavailable | {failed_to_start_connection, Reason :: _}}.
+    {ok, connection_pid(), state()} | {error, pool_unavailable | {connection_failed, Reason :: _}}.
 handle_connection_creation(GroupID, Endpoint, Requester, Locking, State) ->
     case is_pool_available(State) of
         true ->
@@ -449,7 +453,7 @@ handle_connection_creation(GroupID, Endpoint, Requester, Locking, State) ->
                     ConnectionState = new_connection_state(Requester, GroupID, Idx, Pid, Locking),
                     {ok, Pid, set_connection_state(Pid, ConnectionState, inc_starting_count(State1))};
                 {error, Reason} ->
-                    {error, {failed_to_start_connection, Reason}}
+                    {error, {connection_failed, Reason}}
             end;
         false ->
             {error, pool_unavailable}
@@ -593,7 +597,8 @@ process_connection_cleanup({Pid, ConnSt, Iter}, SizeBudget, State) when SizeBudg
     CurrentTime = erlang:monotonic_time(millisecond),
     ConnLoad = get_connection_load(ConnSt#connection_state.idx, State),
     case ConnSt of
-        #connection_state{status = up, idle_since = IdleSince, idx = ConnIdx} when
+        %% Locked connections should not be cleaned up when unused
+        #connection_state{status = up, lock = unlocked, idle_since = IdleSince, idx = ConnIdx} when
             IdleSince + MaxAge =< CurrentTime, ConnLoad =:= 0
         ->
             %% Close connection, 'EXIT' msg will remove it from state
@@ -797,22 +802,20 @@ handle_connection_unlocked_event(ConnectionPid, ClientPid, State) ->
         State
     ).
 
-handle_free_started_event(ConnectionPid, ClientPid, State) ->
-    ConnSt = get_connection_state(ConnectionPid, State),
+handle_free_started_event(ConnSt, ClientPid, State) ->
     handle_event(
         #gunner_free_started_event{
-            connection = ConnectionPid,
+            connection = ConnSt#connection_state.pid,
             group_id = ConnSt#connection_state.group_id,
             client = ClientPid
         },
         State
     ).
 
-handle_free_finished_event(Result, ConnectionPid, ClientPid, State) ->
-    ConnSt = get_connection_state(ConnectionPid, State),
+handle_free_finished_event(Result, ConnSt, ClientPid, State) ->
     handle_event(
         #gunner_free_finished_event{
-            connection = ConnectionPid,
+            connection = ConnSt#connection_state.pid,
             group_id = ConnSt#connection_state.group_id,
             client = ClientPid,
             result = Result
