@@ -20,6 +20,7 @@
     connection_unlocked_event() |
     free_started_event() |
     free_finished_event() |
+    free_error_event() |
     cleanup_started_event() |
     cleanup_finished_event() |
     client_down_event() |
@@ -44,6 +45,7 @@
 
 -type free_started_event() :: #gunner_free_started_event{}.
 -type free_finished_event() :: #gunner_free_finished_event{}.
+-type free_error_event() :: #gunner_free_error_event{}.
 
 -type cleanup_started_event() :: #gunner_cleanup_started_event{}.
 -type cleanup_finished_event() :: #gunner_cleanup_finished_event{}.
@@ -68,6 +70,7 @@
 
 -export_type([free_started_event/0]).
 -export_type([free_finished_event/0]).
+-export_type([free_error_event/0]).
 
 -export_type([cleanup_started_event/0]).
 -export_type([cleanup_finished_event/0]).

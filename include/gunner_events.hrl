@@ -44,6 +44,11 @@
     result :: ok | {error, not_locked}
 }).
 
+-record(gunner_free_error_event, {
+    client :: pid(),
+    reason :: connection_not_found
+}).
+
 -record(gunner_cleanup_started_event, {
     active_connections :: integer()
 }).

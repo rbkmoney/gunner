@@ -3,8 +3,6 @@
 -include("gunner_events.hrl").
 -include("gunner_event_helpers.hrl").
 
--include_lib("stdlib/include/assert.hrl").
-
 -export([all/0]).
 -export([groups/0]).
 -export([init_per_suite/1]).
@@ -30,9 +28,11 @@
 -define(POOL_PID_PROP, pool_pid).
 -define(POOL_PID(C), proplists:get_value(?POOL_PID_PROP, C)).
 
--define(EH_ID, suite_pool).
 -define(EH_STORAGE_PROP, event_handler_storage_pid).
 -define(EH_STORAGE(C), proplists:get_value(?EH_STORAGE_PROP, C)).
+
+-define(MOCKS_PROP, mock_refs).
+-define(MOCKS(C), proplists:get_value(?MOCKS_PROP, C)).
 
 -define(CNT_PROP, counter_ref).
 -define(CNT(C), proplists:get_value(?CNT_PROP, C)).
@@ -47,6 +47,8 @@
 -define(POOL_CLEANUP_INTERVAL, 200).
 -define(POOL_MAX_AGE, 100).
 
+-define(NUM_VALID_ENDPOINTS, 10).
+
 %%
 
 -spec all() -> [test_case_name() | {group, group_name()}].
@@ -58,12 +60,11 @@ groups() -> [].
 -spec init_per_suite(config()) -> config().
 init_per_suite(C) ->
     Apps = [application:ensure_all_started(App) || App <- [ponos, cowboy, gunner]],
-    {ok, EventStorage} = gunner_test_event_h:start_storage(),
-    _ = start_mock_server(),
+    Mocks = start_mock_server(),
     CntRef = counters:new(1, [write_concurrency]),
     C ++
         [
-            {?EH_STORAGE_PROP, EventStorage},
+            {?MOCKS_PROP, Mocks},
             {?CNT_PROP, CntRef},
             {?CNT_FAIL_PROP, 1},
             {apps, [App || {ok, App} <- Apps]}
@@ -71,8 +72,7 @@ init_per_suite(C) ->
 
 -spec end_per_suite(config()) -> _.
 end_per_suite(C) ->
-    ok = gunner_test_event_h:stop_storage(?EH_STORAGE(C)),
-    _ = stop_mock_server(),
+    _ = stop_mock_server(?MOCKS(C)),
     _ = lists:foreach(fun(App) -> application:stop(App) end, proplists:get_value(apps, C)),
     ok.
 
@@ -90,18 +90,20 @@ end_per_group(_Name, _C) ->
 
 -spec init_per_testcase(test_case_name(), config()) -> config().
 init_per_testcase(_Name, C) ->
+    {ok, EventStorage} = gunner_test_event_h:start_storage(),
     {ok, PoolPid} = gunner:start_pool(#{
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_idle_age => ?POOL_MAX_AGE,
         max_size => ?POOL_MAX_SIZE,
         min_size => ?POOL_MIN_SIZE,
-        event_handler => gunner_test_event_h:make_event_h(?EH_ID, ?EH_STORAGE(C))
+        event_handler => gunner_test_event_h:make_event_h(EventStorage)
     }),
-    C ++ [{?POOL_PID_PROP, PoolPid}].
+    C ++ [{?EH_STORAGE_PROP, EventStorage}, {?POOL_PID_PROP, PoolPid}].
 
 -spec end_per_testcase(test_case_name(), config()) -> _.
 end_per_testcase(_Name, C) ->
     ok = gunner:stop_pool(?POOL_PID(C)),
+    ok = gunner_test_event_h:stop_storage(?EH_STORAGE(C)),
     ok.
 
 %%
@@ -191,7 +193,7 @@ make_task_fun(C, TaskFun) ->
 
 report_fail(C, Error) ->
     %% Good enough for now
-    _ = ct:pal("~p~n", [Error]),
+    _ = ct:pal("Load task encountered an error: ~p~n", [Error]),
     ok = counters:add(?CNT(C), ?CNT_FAIL(C), 1).
 
 check_failures(C) ->
@@ -199,7 +201,7 @@ check_failures(C) ->
         0 ->
             ok;
         Failures ->
-            _ = ct:pal("~p~n", [pop_events(C)]),
+            _ = ct:pal("Load test finished with ~p failures.~nDumping pool events: ~p~n", [Failures, pop_events(C)]),
             {error, {failure_count, Failures}}
     end.
 
@@ -237,13 +239,8 @@ await_finish({[Name | Rest], Opts} = Generator, Tick, Timeout) ->
 pop_events(C) ->
     pop_events(C, #{}).
 
-pop_events(C, Opts) when is_map(Opts) ->
-    pop_events(C, Opts, ?EH_ID);
-pop_events(C, ID) when is_atom(ID) ->
-    pop_events(C, #{}, ID).
-
-pop_events(C, Opts, ID) ->
-    {ok, Events} = gunner_test_event_h:pop_events(?EH_STORAGE(C), ID),
+pop_events(C, Opts) ->
+    {ok, Events} = gunner_test_event_h:pop_events(?EH_STORAGE(C)),
     filter_events(Events, Opts).
 
 filter_events(Events, #{ignore_cleanups := true}) ->
@@ -261,10 +258,14 @@ filter_events(Events, _Opts) ->
 %%
 
 valid_host() ->
-    Hosts = [
-        {"localhost", 8080},
-        {"localhost", 8086}
-    ],
+    Hosts = lists:foldl(
+        fun(ID, Acc) ->
+            Ref = {mock_http_server, ID},
+            [{"localhost", mock_http_server:get_port(Ref)} | Acc]
+        end,
+        [],
+        lists:seq(1, ?NUM_VALID_ENDPOINTS)
+    ),
     lists:nth(rand:uniform(length(Hosts)), Hosts).
 
 start_mock_server() ->
@@ -275,10 +276,18 @@ start_mock_server() ->
 
 start_mock_server(HandlerFun) ->
     Opts = #{request_timeout => infinity},
-    _ = mock_http_server:start(default, 8080, HandlerFun, Opts),
-    _ = mock_http_server:start(alternative, 8086, HandlerFun, Opts),
-    ok.
+    lists:foldl(
+        fun(ID, Acc) ->
+            Ref = {mock_http_server, ID},
+            _ = mock_http_server:start(Ref, HandlerFun, Opts),
+            [Ref | Acc]
+        end,
+        [],
+        lists:seq(1, ?NUM_VALID_ENDPOINTS)
+    ).
 
-stop_mock_server() ->
-    ok = mock_http_server:stop(default),
-    ok = mock_http_server:stop(alternative).
+stop_mock_server([]) ->
+    ok;
+stop_mock_server([Ref | Rest]) ->
+    ok = mock_http_server:stop(Ref),
+    stop_mock_server(Rest).

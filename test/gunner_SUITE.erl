@@ -46,7 +46,6 @@
 -define(POOL_PID_PROP, pool_pid).
 -define(POOL_PID(C), proplists:get_value(?POOL_PID_PROP, C)).
 
--define(EH_ID, suite_pool).
 -define(EH_STORAGE_PROP, event_handler_storage_pid).
 -define(EH_STORAGE(C), proplists:get_value(?EH_STORAGE_PROP, C)).
 
@@ -96,13 +95,11 @@ groups() ->
 -spec init_per_suite(config()) -> config().
 init_per_suite(C) ->
     Apps = [application:ensure_all_started(App) || App <- [cowboy, gunner]],
-    {ok, EventStorage} = gunner_test_event_h:start_storage(),
     _ = start_mock_server(),
-    C ++ [{?EH_STORAGE_PROP, EventStorage}, {apps, [App || {ok, App} <- Apps]}].
+    C ++ [{apps, [App || {ok, App} <- Apps]}].
 
 -spec end_per_suite(config()) -> _.
 end_per_suite(C) ->
-    ok = gunner_test_event_h:stop_storage(?EH_STORAGE(C)),
     _ = stop_mock_server(),
     _ = lists:foreach(fun(App) -> application:stop(App) end, proplists:get_value(apps, C)),
     ok.
@@ -120,33 +117,41 @@ end_per_group(_Name, _C) ->
 %%
 
 -spec init_per_testcase(test_case_name(), config()) -> config().
-init_per_testcase(_Name, C) ->
+init_per_testcase(Name, C) when Name =/= pool_lifetime_test ->
+    {ok, EventStorage} = gunner_test_event_h:start_storage(),
     {ok, PoolPid} = gunner:start_pool(#{
         cleanup_interval => ?POOL_CLEANUP_INTERVAL,
         max_connection_idle_age => ?POOL_MAX_AGE,
         max_size => ?POOL_MAX_SIZE,
         min_size => ?POOL_MIN_SIZE,
-        event_handler => gunner_test_event_h:make_event_h(?EH_ID, ?EH_STORAGE(C))
+        event_handler => gunner_test_event_h:make_event_h(EventStorage)
     }),
-    C ++ [{?POOL_PID_PROP, PoolPid}].
+    C ++ [{?EH_STORAGE_PROP, EventStorage}, {?POOL_PID_PROP, PoolPid}];
+init_per_testcase(_Name, C) ->
+    C.
 
 -spec end_per_testcase(test_case_name(), config()) -> _.
-end_per_testcase(_Name, C) ->
+end_per_testcase(Name, C) when Name =/= pool_lifetime_test ->
     ok = gunner:stop_pool(?POOL_PID(C)),
+    ok = gunner_test_event_h:stop_storage(?EH_STORAGE(C)),
+    ok;
+end_per_testcase(_Name, _C) ->
     ok.
 
 %%
 
 -spec pool_lifetime_test(config()) -> test_return().
-pool_lifetime_test(C) ->
+pool_lifetime_test(_C) ->
+    {ok, EventStorage} = gunner_test_event_h:start_storage(),
     PoolRef = {local, test_gunner_pool},
-    PoolOpts = #{event_handler => gunner_test_event_h:make_event_h(lifetime_test, ?EH_STORAGE(C))},
+    PoolOpts = #{event_handler => gunner_test_event_h:make_event_h(EventStorage)},
     {ok, Pid} = gunner:start_pool(PoolRef, PoolOpts),
-    [?pool_init(PoolOpts)] = pop_events(C, lifetime_test),
+    [?pool_init(PoolOpts)] = pop_events(EventStorage),
     ?assertEqual({error, already_exists}, gunner:start_pool(PoolRef, PoolOpts)),
-    [] = pop_events(C, lifetime_test),
+    [] = pop_events(EventStorage),
     ?assertEqual(ok, gunner:stop_pool(Pid)),
-    [?pool_terminate(_)] = pop_events(C, lifetime_test).
+    [?pool_terminate(_)] = pop_events(EventStorage),
+    ok = gunner_test_event_h:stop_storage(EventStorage).
 
 -spec pool_not_found_test(config()) -> test_return().
 pool_not_found_test(_C) ->
@@ -517,40 +522,47 @@ pool_no_double_free_test(C) ->
 
 %%
 
+-define(EVENT_POLL_SLEEP, 100).
+
 wait_events(MatchFns, Opts, C) ->
     wait_events(MatchFns, Opts, C, 1000).
 
 wait_events(MatchFns, Opts, C, Timeout) ->
-    wait_events(?EH_ID, MatchFns, Opts, C, Timeout).
+    wait_events_(MatchFns, [], [], [], timeout_to_deadline(Timeout), Opts, C).
 
-wait_events(ID, MatchFns, Opts, C, Timeout) ->
-    wait_events(ID, MatchFns, [], [], [], Timeout, Opts, C).
-
-wait_events(_ID, [], _UnmatchedEvents, MatchedEvents, _RcvEvents, _Timeout, _Opts, _C) ->
+wait_events_([], _UnmatchedEvents, MatchedEvents, _RcvEvents, _Deadline, _Opts, _C) ->
     lists:reverse(MatchedEvents);
-wait_events(_ID, _MatchFns, _UnmatchedEvents, MatchedEvents, RcvEvents, Timeout, _Opts, _C) when Timeout =< 0 ->
-    throw({timeout, {RcvEvents, MatchedEvents}});
-wait_events(ID, MatchFns, [], MatchedEvents, RcvEvents, Timeout, Opts, C) ->
-    Time0 = erlang:monotonic_time(millisecond),
-    NewEvents = pop_events(C, Opts, ID),
-    Time = erlang:monotonic_time(millisecond) - Time0,
-    wait_events(ID, MatchFns, NewEvents, MatchedEvents, RcvEvents ++ NewEvents, Timeout - Time, Opts, C);
-wait_events(ID, [MatchFn | FnRest] = MatchFns, [UnmatchedEv | EvTail], MatchedEvents, RcvEvents, Timeout, Opts, C) ->
+wait_events_(MatchFns, [], MatchedEvents, RcvEvents, Deadline, Opts, C) ->
+    case genlib_time:unow() of
+        Now when Deadline < Now ->
+            throw({timeout, {RcvEvents, MatchedEvents}});
+        _ ->
+            NewEvents = pop_events(C, Opts),
+            _ = timer:sleep(?EVENT_POLL_SLEEP),
+            wait_events_(MatchFns, NewEvents, MatchedEvents, RcvEvents ++ NewEvents, Deadline, Opts, C)
+    end;
+wait_events_([MatchFn | FnRest] = MatchFns, [UnmatchedEv | EvTail], MatchedEvents, RcvEvents, Deadline, Opts, C) ->
     case MatchFn(UnmatchedEv) of
         true ->
-            wait_events(ID, FnRest, EvTail, [UnmatchedEv | MatchedEvents], RcvEvents, Timeout, Opts, C);
+            wait_events_(FnRest, EvTail, [UnmatchedEv | MatchedEvents], RcvEvents, Deadline, Opts, C);
         false ->
-            wait_events(ID, MatchFns, EvTail, MatchedEvents, RcvEvents, Timeout, Opts, C)
+            wait_events_(MatchFns, EvTail, MatchedEvents, RcvEvents, Deadline, Opts, C)
     end.
 
-pop_events(C, Opts) when is_map(Opts) ->
-    pop_events(C, Opts, ?EH_ID);
-pop_events(C, ID) when is_atom(ID) ->
-    pop_events(C, #{}, ID).
+timeout_to_deadline(Timeout) ->
+    genlib_time:unow() + Timeout.
 
-pop_events(C, Opts, ID) ->
-    {ok, Events} = gunner_test_event_h:pop_events(?EH_STORAGE(C), ID),
+pop_events(ConfOrPid) ->
+    pop_events(ConfOrPid, #{}).
+
+pop_events(ConfOrPid, Opts) ->
+    {ok, Events} = gunner_test_event_h:pop_events(get_storage_pid(ConfOrPid)),
     filter_events(Events, Opts).
+
+get_storage_pid(Pid) when is_pid(Pid) ->
+    Pid;
+get_storage_pid(Conf) when is_list(Conf) ->
+    ?EH_STORAGE(Conf).
 
 filter_events(Events, #{ignore_cleanups := true}) ->
     lists:filter(

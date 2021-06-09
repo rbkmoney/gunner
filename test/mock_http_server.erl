@@ -1,18 +1,22 @@
 -module(mock_http_server).
 
+-export([start/2]).
+-export([get_port/1]).
 -export([start/3]).
 -export([start/4]).
 -export([stop/1]).
 
 -export([init/2]).
 
--define(SERVER, mock_http_server).
+-spec start(ranch:ref(), fun()) -> pid().
+start(ID, Handler) ->
+    start(ID, Handler, #{}).
 
--spec start(atom(), integer(), fun()) -> pid().
-start(ID, Port, Handler) ->
-    start(ID, Port, Handler, #{}).
+-spec start(ranch:ref(), fun(), map()) -> pid().
+start(ID, Handler, CowboyConf) ->
+    start(ID, 0, Handler, CowboyConf).
 
--spec start(atom(), integer(), fun(), map()) -> pid().
+-spec start(ranch:ref(), integer(), fun(), map()) -> pid().
 start(ID, Port, Handler, CowboyConf) ->
     Dispatch = cowboy_router:compile([
         {'_', [{'_', ?MODULE, #{handler => Handler}}]}
@@ -24,7 +28,11 @@ start(ID, Port, Handler, CowboyConf) ->
     ),
     Pid.
 
--spec stop(atom()) -> ok.
+-spec get_port(ranch:ref()) -> integer().
+get_port(ID) ->
+    ranch:get_port(ID).
+
+-spec stop(ranch:ref()) -> ok.
 stop(ID) ->
     cowboy:stop_listener(ID).
 

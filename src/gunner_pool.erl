@@ -284,7 +284,8 @@ handle_cast({free, ConnectionPid, ClientPid}, State0) ->
                     {noreply, State2}
             end;
         _ ->
-            {noreply, State0}
+            State1 = handle_free_error_event(connection_not_found, ClientPid, State0),
+            {noreply, State1}
     end.
 
 -spec handle_info(any(), state()) -> {noreply, state()}.
@@ -407,9 +408,9 @@ get_connection_load(Idx, State) ->
 -spec handle_free_connection(connection_state(), client_pid(), state()) -> {ok, state()} | not_locked.
 handle_free_connection(#connection_state{status = up, lock = {locked, ClientPid}} = ConnSt, ClientPid, State) ->
     ConnSt1 = reset_connection_idle(ConnSt),
-    ConnPid = ConnSt1#connection_state.pid,
-    State1 = set_connection_state(ConnPid, ConnSt1, State),
-    {ok, unlock_connection(ConnPid, ClientPid, State1)};
+    State1 = do_unlock_connection(ConnSt1, ClientPid, State),
+    State2 = remove_connection_from_client_state(ConnSt1#connection_state.pid, ClientPid, State1),
+    {ok, State2};
 handle_free_connection(_, _ClientPid, _State) ->
     not_locked.
 
@@ -576,7 +577,8 @@ handle_client_down(ClientPid, Mref, _Reason, State) ->
 unlock_client_connections([], _ClientPid, State) ->
     State;
 unlock_client_connections([ConnectionPid | Rest], ClientPid, State) ->
-    State1 = do_unlock_connection(ConnectionPid, ClientPid, State),
+    ConnectionSt = get_connection_state(ConnectionPid, State),
+    State1 = do_unlock_connection(ConnectionSt, ClientPid, State),
     unlock_client_connections(Rest, ClientPid, State1).
 
 %%
@@ -643,17 +645,11 @@ do_lock_connection(ConnectionPid, ClientPid, State) ->
 do_add_connection_to_client(ConnectionPid, ClientSt = #client_state{connections = Connections}) ->
     ClientSt#client_state{connections = [ConnectionPid | Connections]}.
 
--spec unlock_connection(connection_pid(), client_pid(), state()) -> state().
-unlock_connection(ConnectionPid, ClientPid, State) ->
-    State1 = do_unlock_connection(ConnectionPid, ClientPid, State),
-    remove_connection_from_client_state(ConnectionPid, ClientPid, State1).
-
--spec do_unlock_connection(connection_pid(), client_pid(), state()) -> state().
-do_unlock_connection(ConnectionPid, ClientPid, State) ->
-    ConnectionSt = get_connection_state(ConnectionPid, State),
+-spec do_unlock_connection(connection_state(), client_pid(), state()) -> state().
+do_unlock_connection(ConnectionSt, ClientPid, State) ->
     ConnectionSt1 = ConnectionSt#connection_state{status = up, lock = unlocked},
-    State1 = set_connection_state(ConnectionPid, ConnectionSt1, State),
-    handle_connection_unlocked_event(ConnectionPid, ClientPid, State1).
+    State1 = set_connection_state(ConnectionSt1#connection_state.pid, ConnectionSt1, State),
+    handle_connection_unlocked_event(ConnectionSt1, ClientPid, State1).
 
 -spec remove_connection_from_client_state(connection_pid(), client_pid(), state()) -> state().
 remove_connection_from_client_state(ConnectionPid, ClientPid, State) ->
@@ -791,11 +787,10 @@ handle_connection_locked_event(ConnectionPid, ClientPid, State) ->
         State
     ).
 
-handle_connection_unlocked_event(ConnectionPid, ClientPid, State) ->
-    ConnSt = get_connection_state(ConnectionPid, State),
+handle_connection_unlocked_event(ConnSt, ClientPid, State) ->
     handle_event(
         #gunner_connection_unlocked_event{
-            connection = ConnectionPid,
+            connection = ConnSt#connection_state.pid,
             group_id = ConnSt#connection_state.group_id,
             client = ClientPid
         },
@@ -819,6 +814,15 @@ handle_free_finished_event(Result, ConnSt, ClientPid, State) ->
             group_id = ConnSt#connection_state.group_id,
             client = ClientPid,
             result = Result
+        },
+        State
+    ).
+
+handle_free_error_event(Reason, ClientPid, State) ->
+    handle_event(
+        #gunner_free_error_event{
+            client = ClientPid,
+            reason = Reason
         },
         State
     ).
