@@ -13,8 +13,8 @@
 }).
 
 -record(gunner_acquire_finished_event, {
-    group_id :: gunner_pool:group_id() | undefined,
-    client :: pid() | undefined,
+    group_id :: gunner_pool:group_id(),
+    client :: pid(),
     result :: ok | {error, pool_unavailable | {connection_failed, Reason :: _}},
     connection :: gunner_pool:connection_pid() | undefined
 }).

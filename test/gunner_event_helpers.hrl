@@ -26,7 +26,8 @@ end).
     connection = Connection
 }).
 
--define(acquire_finished_error(Client, Error), #gunner_acquire_finished_event{
+-define(acquire_finished_error(GroupId, Client, Error), #gunner_acquire_finished_event{
+    group_id = GroupId,
     client = Client,
     result = {error, Error}
 }).

@@ -258,13 +258,13 @@ handle_call({acquire, Endpoint, Locking}, {ClientPid, _} = From, State0) ->
     State1 = emit_acquire_started_event(GroupID, ClientPid, Locking, State0),
     case handle_acquire_connection(Endpoint, GroupID, Locking, From, State1) of
         {{ok, {ready, Connection}}, NewState} ->
-            NewState1 = emit_acquire_finished_event({ok, Connection}, ClientPid, NewState),
+            NewState1 = emit_acquire_finished_event({ok, Connection}, GroupID, ClientPid, NewState),
             {reply, {ok, Connection}, NewState1};
         {{ok, {started, Connection}}, NewState} ->
             NewState1 = emit_connection_init_started_event(Connection, NewState),
             {noreply, NewState1};
         {error, Reason} ->
-            State2 = emit_acquire_finished_event({error, Reason}, ClientPid, State1),
+            State2 = emit_acquire_finished_event({error, Reason}, GroupID, ClientPid, State1),
             {reply, {error, Reason}, State2}
     end.
 
@@ -510,7 +510,7 @@ close_gun_connection(ConnectionPid) ->
 
 -spec handle_connection_started(connection_pid(), state()) -> state().
 handle_connection_started(ConnectionPid, State) ->
-    #connection_state{status = {starting, {ClientPid, _} = Requester, Locking}} =
+    #connection_state{group_id = GroupID, status = {starting, {ClientPid, _} = Requester, Locking}} =
         ConnSt = get_connection_state(ConnectionPid, State),
     ConnSt1 = ConnSt#connection_state{status = up, lock = unlocked},
     ConnSt2 = reset_connection_idle(ConnSt1),
@@ -518,7 +518,7 @@ handle_connection_started(ConnectionPid, State) ->
     State1 = set_connection_state(ConnectionPid, ConnSt2, State),
     State2 = dec_starting_count(inc_active_count(State1)),
     State3 = maybe_lock_connection(Locking, ConnectionPid, ClientPid, State2),
-    emit_acquire_finished_event({ok, ConnectionPid}, ClientPid, State3).
+    emit_acquire_finished_event({ok, ConnectionPid}, GroupID, ClientPid, State3).
 
 -spec reply_to_requester(term(), requester()) -> ok.
 reply_to_requester(Message, Requester) ->
@@ -534,7 +534,11 @@ handle_connection_down(ConnectionPid, Reason, State) ->
     process_connection_removal(ConnSt, Reason, State).
 
 -spec process_connection_removal(connection_state(), Reason :: _, state()) -> state().
-process_connection_removal(ConnState = #connection_state{status = {starting, Requester, _Locking}}, Reason, State) ->
+process_connection_removal(
+    ConnState = #connection_state{group_id = GroupID, status = {starting, Requester, _Locking}},
+    Reason,
+    State
+) ->
     ok = reply_to_requester({error, {connection_failed, Reason}}, Requester),
     State1 = free_connection_idx(ConnState#connection_state.idx, State),
     State2 = emit_connection_init_finished_event(
@@ -543,7 +547,7 @@ process_connection_removal(ConnState = #connection_state{status = {starting, Req
         State1
     ),
     {ClientPid, _} = Requester,
-    State3 = emit_acquire_finished_event({error, {connection_failed, Reason}}, ClientPid, State2),
+    State3 = emit_acquire_finished_event({error, {connection_failed, Reason}}, GroupID, ClientPid, State2),
     remove_connection(ConnState, dec_starting_count(State3));
 process_connection_removal(ConnState = #connection_state{status = up}, Reason, State) ->
     State1 = emit_connection_down_event({abnormal, Reason}, ConnState#connection_state.pid, State),
@@ -756,21 +760,21 @@ emit_acquire_started_event(GroupID, Client, Locking, State) ->
         State
     ).
 
-emit_acquire_finished_event({ok, ConnectionPid}, Client, State) ->
-    ConnSt = get_connection_state(ConnectionPid, State),
+emit_acquire_finished_event({ok, ConnectionPid}, GroupID, Client, State) ->
     emit_event(
         #gunner_acquire_finished_event{
             result = ok,
             connection = ConnectionPid,
-            group_id = ConnSt#connection_state.group_id,
+            group_id = GroupID,
             client = Client
         },
         State
     );
-emit_acquire_finished_event(Result = {error, _}, Client, State) ->
+emit_acquire_finished_event(Result = {error, _}, GroupID, Client, State) ->
     emit_event(
         #gunner_acquire_finished_event{
             result = Result,
+            group_id = GroupID,
             client = Client
         },
         State

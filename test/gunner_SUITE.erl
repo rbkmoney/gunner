@@ -248,13 +248,13 @@ invalid_domain_test(C) ->
         ?acquire_started(Endpoint, ClientPid, false),
         ?connection_init_started(Endpoint, ConnectionPid),
         ?connection_init_finished(Endpoint, ConnectionPid, {error, Error}),
-        ?acquire_finished_error(ClientPid, Error)
+        ?acquire_finished_error(Endpoint, ClientPid, Error)
     ] = wait_events(
         [
             ?EV_MATCH(?acquire_started(Endpoint, ClientPid, false)),
             ?EV_MATCH(?connection_init_started(Endpoint, _)),
             ?EV_MATCH(?connection_init_finished(Endpoint, _, {error, Error})),
-            ?EV_MATCH(?acquire_finished_error(ClientPid, Error))
+            ?EV_MATCH(?acquire_finished_error(Endpoint, ClientPid, Error))
         ],
         #{ignore_cleanups => false},
         C
@@ -271,13 +271,13 @@ connection_refused_test(C) ->
         ?acquire_started(Endpoint, ClientPid, false),
         ?connection_init_started(Endpoint, ConnectionPid),
         ?connection_init_finished(Endpoint, ConnectionPid, {error, Error}),
-        ?acquire_finished_error(ClientPid, Error)
+        ?acquire_finished_error(Endpoint, ClientPid, Error)
     ] = wait_events(
         [
             ?EV_MATCH(?acquire_started(Endpoint, ClientPid, false)),
             ?EV_MATCH(?connection_init_started(Endpoint, _)),
             ?EV_MATCH(?connection_init_finished(Endpoint, _, {error, Error})),
-            ?EV_MATCH(?acquire_finished_error(ClientPid, Error))
+            ?EV_MATCH(?acquire_finished_error(Endpoint, ClientPid, Error))
         ],
         #{ignore_cleanups => false},
         C
@@ -292,11 +292,11 @@ pool_unavailable_test(C) ->
     {error, pool_unavailable} = gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000),
     [
         ?acquire_started(Endpoint, ClientPid, true),
-        ?acquire_finished_error(ClientPid, pool_unavailable)
+        ?acquire_finished_error(Endpoint, ClientPid, pool_unavailable)
     ] = wait_events(
         [
             ?EV_MATCH(?acquire_started(Endpoint, ClientPid, true)),
-            ?EV_MATCH(?acquire_finished_error(ClientPid, pool_unavailable))
+            ?EV_MATCH(?acquire_finished_error(Endpoint, ClientPid, pool_unavailable))
         ],
         #{ignore_cleanups => false},
         C
