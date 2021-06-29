@@ -241,11 +241,12 @@ call_pool(PoolRef, Args, Timeout) ->
 %%
 
 -spec init(list()) -> {ok, state()}.
-init([PoolOpts]) ->
-    State = new_state(PoolOpts),
+init([InitOpts]) ->
+    Opts = maps:merge(default_opts(), InitOpts),
+    State = new_state(Opts),
     _ = erlang:process_flag(trap_exit, true),
     _ = erlang:send_after(State#state.cleanup_interval, self(), ?GUNNER_CLEANUP()),
-    State1 = emit_init_event(PoolOpts, State),
+    State1 = emit_init_event(Opts, State),
     {ok, State1}.
 
 -spec handle_call
@@ -316,22 +317,34 @@ terminate(Reason, State) ->
 
 %%
 
+-spec default_opts() -> pool_opts().
+default_opts() ->
+    #{
+        cleanup_interval => ?DEFAULT_CLEANUP_INTERVAL,
+        max_connection_load => ?DEFAULT_MAX_CONNECTION_LOAD,
+        max_connection_idle_age => ?DEFAULT_MAX_CONNECTION_IDLE_AGE,
+        max_size => ?DEFAULT_MAX_SIZE,
+        min_size => ?DEFAULT_MIN_SIZE,
+        connection_opts => ?DEFAULT_CONNECTION_OPTS,
+        event_handler => ?DEFAULT_EVENT_HANDLER
+    }.
+
 -spec new_state(pool_opts()) -> state().
 new_state(Opts) ->
-    MaxSize = maps:get(max_size, Opts, ?DEFAULT_MAX_SIZE),
+    MaxSize = maps:get(max_size, Opts),
     #state{
         max_size = MaxSize,
-        min_size = maps:get(min_size, Opts, ?DEFAULT_MIN_SIZE),
+        min_size = maps:get(min_size, Opts),
         active_count = 0,
         starting_count = 0,
-        max_connection_load = maps:get(max_connection_load, Opts, ?DEFAULT_MAX_CONNECTION_LOAD),
+        max_connection_load = maps:get(max_connection_load, Opts),
         idx_authority = gunner_idx_authority:new(MaxSize),
         counters_ref = counters:new(MaxSize, [atomics]),
         connections = #{},
-        connection_opts = maps:get(connection_opts, Opts, ?DEFAULT_CONNECTION_OPTS),
-        cleanup_interval = maps:get(cleanup_interval, Opts, ?DEFAULT_CLEANUP_INTERVAL),
-        max_connection_idle_age = maps:get(max_connection_idle_age, Opts, ?DEFAULT_MAX_CONNECTION_IDLE_AGE),
-        event_handler = maps:get(event_handler, Opts, ?DEFAULT_EVENT_HANDLER)
+        connection_opts = maps:get(connection_opts, Opts),
+        cleanup_interval = maps:get(cleanup_interval, Opts),
+        max_connection_idle_age = maps:get(max_connection_idle_age, Opts),
+        event_handler = maps:get(event_handler, Opts)
     }.
 
 %%
