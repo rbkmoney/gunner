@@ -158,7 +158,7 @@ pool_lifetime_test(_C) ->
             event_handler := EventHandler
         })
     ] = pop_events(EventStorage),
-    ?assertEqual({error, already_exists}, gunner:start_pool(PoolRef, PoolOpts)),
+    ?assertEqual({error, {pool, already_exists}}, gunner:start_pool(PoolRef, PoolOpts)),
     [] = pop_events(EventStorage),
     ?assertEqual(ok, gunner:stop_pool(Pid)),
     [?pool_terminate(_)] = pop_events(EventStorage),
@@ -166,7 +166,7 @@ pool_lifetime_test(_C) ->
 
 -spec pool_not_found_test(config()) -> test_return().
 pool_not_found_test(_C) ->
-    ?assertEqual({error, pool_not_found}, gunner:get(what, valid_host(), <<"/">>)).
+    ?assertEqual({error, {pool, not_found}}, gunner:get(what, valid_host(), <<"/">>)).
 
 %%
 
@@ -300,14 +300,14 @@ pool_unavailable_test(C) ->
     ClientPid = self(),
     Endpoint = {"localhost", 8080},
     _Connections = [gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000) || _X <- lists:seq(1, ?POOL_MAX_SIZE)],
-    {error, pool_unavailable} = gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000),
+    {error, {pool, unavailable}} = gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000),
     [
         ?acquire_started(Endpoint, ClientPid, true),
-        ?acquire_finished_error(Endpoint, ClientPid, pool_unavailable)
+        ?acquire_finished_error(Endpoint, ClientPid, {pool, unavailable})
     ] = wait_events(
         [
             ?EV_MATCH(?acquire_started(Endpoint, ClientPid, true)),
-            ?EV_MATCH(?acquire_finished_error(Endpoint, ClientPid, pool_unavailable))
+            ?EV_MATCH(?acquire_finished_error(Endpoint, ClientPid, {pool, unavailable}))
         ],
         #{ignore_cleanups => false},
         C
@@ -328,7 +328,7 @@ pool_cleanup_test(C) ->
         ],
         #{ignore_cleanups => false},
         C,
-        ?POOL_CLEANUP_INTERVAL
+        ?POOL_CLEANUP_INTERVAL * 2
     ),
     _ = [gunner_pool:free(?POOL_PID(C), ConnectionPid) || {ok, ConnectionPid} <- Connections],
     [
@@ -341,7 +341,7 @@ pool_cleanup_test(C) ->
         ],
         #{ignore_cleanups => false},
         C,
-        ?POOL_CLEANUP_INTERVAL
+        ?POOL_CLEANUP_INTERVAL * 2
     ),
     ok.
 
@@ -544,9 +544,9 @@ wait_events(MatchFns, Opts, C, Timeout) ->
 wait_events_([], _UnmatchedEvents, MatchedEvents, _RcvEvents, _Deadline, _Opts, _C) ->
     lists:reverse(MatchedEvents);
 wait_events_(MatchFns, [], MatchedEvents, RcvEvents, Deadline, Opts, C) ->
-    case genlib_time:unow() of
+    case erlang:monotonic_time(millisecond) of
         Now when Deadline < Now ->
-            throw({timeout, {RcvEvents, MatchedEvents}});
+            throw({timeout, #{received => RcvEvents, matched => MatchedEvents, unmatched => MatchFns}});
         _ ->
             NewEvents = pop_events(C, Opts),
             _ = timer:sleep(?EVENT_POLL_SLEEP),
@@ -561,7 +561,7 @@ wait_events_([MatchFn | FnRest] = MatchFns, [UnmatchedEv | EvTail], MatchedEvent
     end.
 
 timeout_to_deadline(Timeout) ->
-    genlib_time:unow() + Timeout.
+    erlang:monotonic_time(millisecond) + Timeout.
 
 pop_events(ConfOrPid) ->
     pop_events(ConfOrPid, #{}).

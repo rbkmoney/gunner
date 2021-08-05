@@ -43,7 +43,7 @@
 -type max_connection_idle_age() :: size().
 
 %% @doc Maximum amount of connections in pool. When this value is reached, and a new connection must be opened
-%% to satisfy an 'acquire' pool_unavailable will be returned instead.
+%% to satisfy an 'acquire' {pool, unavailable} will be returned instead.
 -type max_size() :: size().
 
 %% @doc Mininum amount of connections kept in pool. This is a soft limit, so connections must be first opened
@@ -72,8 +72,7 @@
 -type pool_status_response() :: #{total_connections := size(), available_connections := size()}.
 
 -type acquire_error() ::
-    pool_not_found |
-    pool_unavailable |
+    {pool, not_found | unavailable} |
     {connection_failed, _}.
 
 -type locking() :: boolean().
@@ -183,22 +182,22 @@
 start_pool(PoolOpts) ->
     gunner_pool_sup:start_pool(undefined, PoolOpts).
 
--spec start_pool(pool_reg_name() | undefined, pool_opts()) -> {ok, pid()} | {error, already_exists}.
+-spec start_pool(pool_reg_name() | undefined, pool_opts()) -> {ok, pid()} | {error, {pool, already_exists}}.
 start_pool(PoolRegName, PoolOpts) ->
     case gunner_pool_sup:start_pool(PoolRegName, PoolOpts) of
         {ok, Pid} ->
             {ok, Pid};
         {error, {already_started, _}} ->
-            {error, already_exists}
+            {error, {pool, already_exists}}
     end.
 
--spec stop_pool(pid()) -> ok | {error, pool_not_found}.
+-spec stop_pool(pid()) -> ok | {error, {pool, not_found}}.
 stop_pool(Pid) ->
     case gunner_pool_sup:stop_pool(Pid) of
         ok ->
             ok;
         {error, not_found} ->
-            {error, pool_not_found}
+            {error, {pool, not_found}}
     end.
 
 -spec start_link(pool_reg_name() | undefined, pool_opts()) -> genlib_gen:start_ret().
@@ -233,7 +232,9 @@ call_pool(PoolRef, Args, Timeout) ->
         gen_server:call(PoolRef, Args, Timeout)
     catch
         exit:{noproc, _} ->
-            {error, pool_not_found}
+            {error, {pool, not_found}};
+        exit:{timeout, _} ->
+            {error, {pool, unavailable}}
     end.
 
 %%
@@ -252,7 +253,7 @@ init([InitOpts]) ->
 -spec handle_call
     ({acquire, endpoint(), locking()}, from(), state()) ->
         {noreply, state()} |
-        {reply, {ok, connection_pid()} | {error, pool_unavailable | {connection_failed, Reason :: _}}, state()};
+        {reply, {ok, connection_pid()} | {error, {pool, unavailable} | {connection_failed, Reason :: _}}, state()};
     (status, from(), state()) -> {reply, {ok, pool_status_response()}, state()}.
 handle_call({acquire, Endpoint, Locking}, {ClientPid, _} = From, State0) ->
     GroupID = create_group_id(Endpoint),
@@ -353,7 +354,7 @@ new_state(Opts) ->
     {Result, state()} | Error
 when
     Result :: {ok, {started | ready, connection_pid()}},
-    Error :: {error, {connection_failed, _Reason} | pool_unavailable}.
+    Error :: {error, {connection_failed, _Reason} | {pool, unavailable}}.
 handle_acquire_connection(Endpoint, GroupID, Locking, {ClientPid, _} = From, State) ->
     case acquire_connection_from_group(GroupID, State) of
         {connection, ConnPid, St1} ->
@@ -457,7 +458,7 @@ free_connection_idx(Idx, State) ->
 %%
 
 -spec handle_connection_creation(group_id(), endpoint(), requester(), locking(), state()) ->
-    {ok, connection_pid(), state()} | {error, pool_unavailable | {connection_failed, Reason :: _}}.
+    {ok, connection_pid(), state()} | {error, {pool, unavailable} | {connection_failed, Reason :: _}}.
 handle_connection_creation(GroupID, Endpoint, Requester, Locking, State) ->
     case is_pool_available(State) of
         true ->
@@ -470,7 +471,7 @@ handle_connection_creation(GroupID, Endpoint, Requester, Locking, State) ->
                     {error, {connection_failed, Reason}}
             end;
         false ->
-            {error, pool_unavailable}
+            {error, {pool, unavailable}}
     end.
 
 -spec is_pool_available(state()) -> boolean().

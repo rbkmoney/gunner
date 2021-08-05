@@ -92,15 +92,15 @@
 %% API functions
 %%
 
--spec start_pool(pool_opts()) -> {ok, pool()} | {error, already_exists}.
+-spec start_pool(pool_opts()) -> {ok, pool()} | {error, {pool, already_exists}}.
 start_pool(PoolOpts) ->
     gunner_pool:start_pool(PoolOpts).
 
--spec start_pool(pool_reg_name(), pool_opts()) -> {ok, pool()} | {error, already_exists}.
+-spec start_pool(pool_reg_name(), pool_opts()) -> {ok, pool()} | {error, {pool, already_exists}}.
 start_pool(PoolID, PoolOpts) ->
     gunner_pool:start_pool(PoolID, PoolOpts).
 
--spec stop_pool(pool()) -> ok | {error, pool_not_found}.
+-spec stop_pool(pool()) -> ok | {error, {pool, not_found}}.
 stop_pool(Pool) ->
     gunner_pool:stop_pool(Pool).
 

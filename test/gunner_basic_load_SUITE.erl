@@ -129,7 +129,7 @@ task_async_get(C) ->
         case gunner:get(?POOL_PID(C), Endpoint, <<"/", Tag/binary>>) of
             {ok, 200, _, <<"ok/", Tag/binary>>} ->
                 ok;
-            {error, pool_unavailable} ->
+            {error, {pool, unavailable}} ->
                 ok
         end
     end).
@@ -150,7 +150,7 @@ task_sync_post(C) ->
         of
             {ok, <<"ok/", Tag/binary>>} ->
                 ok;
-            {error, pool_unavailable} ->
+            {error, {pool, unavailable}} ->
                 ok
         end
     end).
@@ -161,7 +161,7 @@ task_fail_connection(C) ->
         case gunner:get(?POOL_PID(C), Endpoint, <<"/">>) of
             {error, {connection_failed, {shutdown, nxdomain}}} ->
                 ok;
-            {error, pool_unavailable} ->
+            {error, {pool, unavailable}} ->
                 ok
         end
     end).
@@ -172,7 +172,7 @@ task_no_unlock(C) ->
         case gunner_pool:acquire(?POOL_PID(C), Endpoint, true, 1000) of
             {ok, _ConnectionPid} ->
                 ok;
-            {error, pool_unavailable} ->
+            {error, {pool, unavailable}} ->
                 ok
         end
     end).

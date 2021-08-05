@@ -55,7 +55,7 @@ mk_gunner_runner(PoolID) ->
         case gunner_pool:acquire(PoolID, {"localhost", 8080}, true, 1000) of
             {ok, Connection} ->
                 ok = gunner_pool:free(PoolID, Connection);
-            {error, pool_unavailable} ->
+            {error, {pool, unavailable}} ->
                 ok
         end
     end.
