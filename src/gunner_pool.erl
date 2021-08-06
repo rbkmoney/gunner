@@ -210,13 +210,13 @@ start_link(PoolRegName, PoolOpts) ->
 
 -spec acquire(pool_id(), endpoint(), timeout()) ->
     {ok, connection_pid()} |
-    {error, acquire_error()}.
+    {error, acquire_error() | {call, timeout}}.
 acquire(PoolID, Endpoint, Timeout) ->
     call_pool(PoolID, {acquire, Endpoint, false}, Timeout).
 
 -spec acquire(pool_id(), endpoint(), locking(), timeout()) ->
     {ok, connection_pid()} |
-    {error, acquire_error()}.
+    {error, acquire_error() | {call, timeout}}.
 acquire(PoolID, Endpoint, Locking, Timeout) ->
     call_pool(PoolID, {acquire, Endpoint, Locking}, Timeout).
 
@@ -234,7 +234,7 @@ call_pool(PoolRef, Args, Timeout) ->
         exit:{noproc, _} ->
             {error, {pool, not_found}};
         exit:{timeout, _} ->
-            {error, {pool, unavailable}}
+            {error, {call, timeout}}
     end.
 
 %%
